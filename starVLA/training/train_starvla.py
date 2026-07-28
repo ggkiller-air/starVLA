@@ -42,15 +42,21 @@ from starVLA.training.trainer_utils.trainer_tools import (
     normalize_dotlist_args,
 )
 
-deepspeed_plugin = DeepSpeedPlugin()
-accelerator = Accelerator(deepspeed_plugin=deepspeed_plugin)
-accelerator.print(accelerator.state)
-
 # Sane Defaults
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 # Initialize logger
 logger = get_logger(__name__)
+
+
+def build_accelerator(cfg):
+    gradient_accumulation_steps = int(cfg.trainer.get("gradient_accumulation_steps", 1))
+    accelerator = Accelerator(
+        deepspeed_plugin=DeepSpeedPlugin(),
+        gradient_accumulation_steps=gradient_accumulation_steps,
+    )
+    accelerator.print(accelerator.state)
+    return accelerator
 
 
 def load_fast_tokenizer():
@@ -447,6 +453,7 @@ class VLATrainer(TrainerUtils):
 def main(cfg) -> None:
     logger.info("VLA Training :: Warming Up")
 
+    accelerator = build_accelerator(cfg)
     cfg = wrap_config(cfg)
     logger.info("✅ Configuration wrapped for access tracking")
 

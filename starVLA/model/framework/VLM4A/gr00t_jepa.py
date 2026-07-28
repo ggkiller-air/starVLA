@@ -21,6 +21,13 @@ class GR00TJEPAFrameworkMixin:
         "action_model.tactile_target_encoder.",
         "action_model.state_target_encoder.",
     )
+    _JEPA_DREAM_PREFIXES = (
+        "action_model.tactile_target_encoder.",
+        "action_model.tactile_dream_head.",
+        "action_model.state_target_encoder.",
+        "action_model.state_dream_head.",
+        "action_model.vision_dream_head.",
+    )
 
     def _init_gr00t_jepa(self) -> None:
         if not self.action_model.dream_vision:
@@ -145,7 +152,7 @@ class GR00TJEPAFrameworkMixin:
             if state_window.ndim == 2:
                 current_state = state_window.unsqueeze(1)
             elif state_window.ndim == 3:
-                current_state = state_window[:, :1]
+                current_state = state_window[:, :1] if self.action_model.dream_state else state_window
             else:
                 raise ValueError(f"Expected state [B, D] or [B, T, D], got {state_window.shape}")
             if self.action_model.dream_state:
@@ -186,7 +193,8 @@ class GR00TJEPAFrameworkMixin:
             if state.ndim == 2:
                 state = state.unsqueeze(1)
             elif state.ndim == 3:
-                state = state[:, :1]
+                if self.action_model.dream_state:
+                    state = state[:, :1]
             else:
                 raise ValueError(f"Expected state [B, D] or [B, T, D], got {state.shape}")
         tactile = self._tensorize_optional(examples, "tactile", device, dtype)
@@ -211,14 +219,21 @@ class GR00TJEPAFrameworkMixin:
         }
 
     def validate_jepa_checkpoint_keys(self, missing_keys, unexpected_keys) -> None:
-        invalid_missing = [
-            key for key in missing_keys if not any(key.startswith(prefix) for prefix in self._JEPA_CHECKPOINT_PREFIXES)
-        ]
-        if invalid_missing or unexpected_keys:
+        missing = set(missing_keys)
+        all_jepa = {
+            key
+            for key in self.state_dict()
+            if any(key.startswith(prefix) for prefix in self._JEPA_CHECKPOINT_PREFIXES)
+        }
+        dream_only = {
+            key
+            for key in all_jepa
+            if any(key.startswith(prefix) for prefix in self._JEPA_DREAM_PREFIXES)
+        }
+        valid_missing_sets = {frozenset(), frozenset(all_jepa), frozenset(dream_only)}
+        if frozenset(missing) not in valid_missing_sets or unexpected_keys:
             raise RuntimeError(
                 "Checkpoint is incompatible with this JEPA model: "
-                f"invalid missing={invalid_missing}, unexpected={list(unexpected_keys)}"
+                f"partial/invalid missing={sorted(missing)}, unexpected={list(unexpected_keys)}"
             )
-        self._jepa_teacher_keys_missing = any(
-            key.startswith(prefix) for key in missing_keys for prefix in self._JEPA_TEACHER_PREFIXES
-        )
+        self._jepa_teacher_keys_missing = bool(missing)
