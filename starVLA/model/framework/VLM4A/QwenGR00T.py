@@ -33,7 +33,9 @@ IGNORE_INDEX = -100
 
 from starVLA.model.framework.base_framework import baseframework
 from starVLA.model.framework.share_tools import merge_framework_config
+from starVLA.model.framework.VLM4A.gr00t_jepa import GR00TJEPAFrameworkMixin
 from starVLA.model.modules.action_model.GR00T_ActionHeader import FlowmatchingActionHead, get_action_model
+from starVLA.model.modules.action_model.tactile_jepa import REGION_GRIDS, VALID_IDX
 from starVLA.model.modules.vlm import get_vlm_model
 from starVLA.model.tools import FRAMEWORK_REGISTRY
 from starVLA.training.trainer_utils.trainer_tools import resize_images
@@ -104,6 +106,30 @@ class QwenGR00TDefaultConfig:
             "num_inference_timesteps": 4,
             # Number of vision tokens fed to action head
             "num_target_vision_tokens": 32,
+            # Tactile ablations: notac | input | dream.
+            "tactile_mode": "notac",
+            "tactile_encoder_type": "mlp",
+            "n_tactile_tokens": 8,
+            "tactile_hidden_dim": 512,
+            "tactile_num_heads": 8,
+            "tactile_cnn_channels": 32,
+            "tactile_cnn_pool": [2, 2],
+            "tactile_cnn_coord_scale": 0.1,
+            "tactile_raw_dim": 256,
+            "tactile_valid_idx": list(VALID_IDX),
+            "tactile_region_rows": [rows for rows, _ in REGION_GRIDS],
+            "tactile_region_cols": [cols for _, cols in REGION_GRIDS],
+            "tactile_cnn_coord": False,
+            "dream_horizon": 4,
+            "vision_horizon": 4,
+            "dream_hidden_dim": 1024,
+            "dream_state": False,
+            "dream_vision": False,
+            "ema_decay": 0.999,
+            "tactile_dream_beta": 1.0,
+            "lambda_tactile": 0.5,
+            "lambda_state": 0.5,
+            "lambda_vision": 0.5,
             # === DiT Transformer sub-config ===
             "diffusion_model_cfg": {
                 # Cross-attention dim (aligned to VLM hidden_size at runtime)
@@ -124,7 +150,7 @@ class QwenGR00TDefaultConfig:
 
 
 @FRAMEWORK_REGISTRY.register("QwenGR00T")
-class Qwen_GR00T(baseframework):
+class Qwen_GR00T(GR00TJEPAFrameworkMixin, baseframework):
     """
     Multimodal vision-language-action model (GR00T variant).
 
@@ -163,6 +189,7 @@ class Qwen_GR00T(baseframework):
         # are normalised upstream by `share_tools.apply_config_compat`, so we
         # only ever read `action_horizon` here.
         self.action_horizon = int(self.config.framework.action_model.action_horizon)
+        self._init_gr00t_jepa()
 
     def forward(
         self,
@@ -172,10 +199,6 @@ class Qwen_GR00T(baseframework):
         """ """
         batch_images = [example["image"] for example in examples]  #  [B，[PLT]]
         instructions = [example["lang"] for example in examples]  # [B, str]
-        actions = [example["action"] for example in examples]  # label [B， len, 7]
-
-        state = [example["state"] for example in examples] if "state" in examples[0] else None  # [B, 1, state_dim]
-
         # Step 1: QWenVL input format
         qwen_inputs = self.qwen_vl_interface.build_qwenvl_inputs(images=batch_images, instructions=instructions)
         backbone_attention_mask = qwen_inputs.get("attention_mask", None)
@@ -189,36 +212,8 @@ class Qwen_GR00T(baseframework):
             # last_hidden_state: [B, seq_len, H]
             last_hidden = qwenvl_outputs.hidden_states[-1]  # [B, L, H]
 
-        # Step 4: Action Expert Forward and Loss
         with torch.autocast("cuda", dtype=torch.float32):
-            actions = torch.tensor(
-                np.array(actions), device=last_hidden.device, dtype=last_hidden.dtype
-            )  # [B, T_full, action_dim]
-            actions_target = actions[:, -self.action_horizon :, :]  # (B, action_horizon, action_dim)
-
-            repeated_diffusion_steps = (
-                self.config.framework.action_model.get("repeated_diffusion_steps", 4)
-                if self.config and hasattr(self.config, "framework")
-                else 4
-            )
-            actions_target_repeated = actions_target.repeat(repeated_diffusion_steps, 1, 1)
-            last_hidden_repeated = last_hidden.repeat(repeated_diffusion_steps, 1, 1)
-            if backbone_attention_mask is not None:
-                backbone_attention_mask = backbone_attention_mask.repeat(repeated_diffusion_steps, 1).to(
-                    dtype=torch.bool
-                )
-
-            state_repeated = None
-            if state is not None:
-                state = torch.tensor(np.array(state), device=last_hidden.device, dtype=last_hidden.dtype)
-                state_repeated = state.repeat(repeated_diffusion_steps, 1, 1)
-
-            action_loss = self.action_model(
-                last_hidden_repeated, actions_target_repeated, state_repeated,
-                encoder_attention_mask=backbone_attention_mask,
-            )  # (B, chunk_len, action_dim)
-
-        return {"action_loss": action_loss}
+            return self._forward_gr00t_action(examples, last_hidden, backbone_attention_mask)
 
     @torch.inference_mode()
     def predict_action(
@@ -240,8 +235,6 @@ class Qwen_GR00T(baseframework):
         batch_images = [to_pil_preserve(example["image"]) for example in examples]  #  [B，[PLT]]
         instructions = [example["lang"] for example in examples]  # [B, str]
 
-        state = [example["state"] for example in examples] if "state" in examples[0] else None  # [B, 1, state_dim]
-
         train_obs_image_size = getattr(self.config.datasets.vla_data, "obs_image_size", None)
         if train_obs_image_size:
             batch_images = resize_images(batch_images, target_size=train_obs_image_size)
@@ -262,17 +255,11 @@ class Qwen_GR00T(baseframework):
             # last_hidden_state: [B, seq_len, H]
             last_hidden = qwenvl_outputs.hidden_states[-1]  # [B, L, H]
 
-        state = (
-            torch.from_numpy(np.array(state)).to(last_hidden.device, dtype=last_hidden.dtype)
-            if state is not None
-            else None
-        )
-
         # Step 4: Action Expert Forward
         with torch.autocast("cuda", dtype=torch.float32):
-            pred_actions = self.action_model.predict_action(
-                last_hidden, state, encoder_attention_mask=backbone_attention_mask
-            )  # (B, chunk_len, action_dim)
+            pred_actions = self._predict_gr00t_action(
+                examples, last_hidden, backbone_attention_mask
+            )
 
         normalized_actions = pred_actions.detach().cpu().numpy()
         return {"normalized_actions": normalized_actions}

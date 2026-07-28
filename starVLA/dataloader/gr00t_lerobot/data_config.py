@@ -1079,6 +1079,83 @@ class VLAArenaFrankaDataConfig:
 
 ###########################################################################################
 
+
+class UnitreeG1SonicDataConfig:
+    """LeRobot contract for the stereo Unitree G1 SONIC datasets."""
+
+    embodiment_tag = EmbodimentTag.UNITREE_G1_SONIC
+    video_keys = ["video.ego_view_left", "video.ego_view_right"]
+    tactile_keys = ["tactile.tactile_raw"]
+    state_keys = [
+        "state.left_leg",
+        "state.right_leg",
+        "state.waist",
+        "state.left_arm",
+        "state.right_arm",
+        "state.left_hand",
+        "state.right_hand",
+        "state.projected_gravity",
+    ]
+    action_keys = [
+        "action.motion_token",
+        "action.left_hand_joints",
+        "action.right_hand_joints",
+    ]
+    language_keys = ["annotation.human.task_description"]
+    action_indices = list(range(40))
+
+    def modality_config(self):
+        return self.modality_config_for({})
+
+    def modality_config_for(self, data_cfg):
+        tactile_mode = str(data_cfg.get("tactile_mode", "notac")).lower()
+        if tactile_mode not in {"notac", "input", "dream"}:
+            raise ValueError(f"Unknown tactile_mode {tactile_mode!r}")
+        dream_horizon = int(data_cfg.get("dream_horizon", 4))
+        vision_horizon = int(data_cfg.get("vision_horizon", dream_horizon))
+        dream_state = tactile_mode == "dream" and bool(data_cfg.get("dream_state", False))
+        dream_vision = tactile_mode == "dream" and bool(data_cfg.get("dream_vision", False))
+
+        configs = {
+            "video": ModalityConfig(
+                delta_indices=list(range(vision_horizon + 1)) if dream_vision else [0],
+                modality_keys=self.video_keys,
+            ),
+            "state": ModalityConfig(
+                delta_indices=list(range(dream_horizon + 1)) if dream_state else [0],
+                modality_keys=self.state_keys,
+            ),
+            "action": ModalityConfig(
+                delta_indices=self.action_indices,
+                modality_keys=self.action_keys,
+            ),
+            "language": ModalityConfig(delta_indices=[0], modality_keys=self.language_keys),
+        }
+        if tactile_mode != "notac":
+            configs["tactile"] = ModalityConfig(
+                delta_indices=list(range(dream_horizon + 1)) if tactile_mode == "dream" else [0],
+                modality_keys=self.tactile_keys,
+            )
+        return configs
+
+    def transform(self):
+        transforms = [
+            StateActionToTensor(apply_to=self.state_keys),
+            StateActionTransform(
+                apply_to=self.state_keys,
+                normalization_modes={key: "q99" for key in self.state_keys},
+            ),
+            StateActionToTensor(apply_to=self.action_keys),
+            StateActionTransform(
+                apply_to=self.action_keys,
+                normalization_modes={key: "q99" for key in self.action_keys},
+            ),
+        ]
+        return ComposedModalityTransform(transforms=transforms)
+
+
+###########################################################################################
+
 ROBOT_TYPE_CONFIG_MAP = {
     "libero_franka": Libero4in1DataConfig(),
     "oxe_droid": OxeDroidDataConfig(),
@@ -1091,7 +1168,7 @@ ROBOT_TYPE_CONFIG_MAP = {
     "robotwin50": AgilexData50Config(),
     "fourier_gr1_arms_waist": FourierGr1ArmsWaistDataConfig(),
     "vla_arena_franka": VLAArenaFrankaDataConfig(),
+    "unitree_g1_sonic": UnitreeG1SonicDataConfig(),
 
     "custom_robot_config": SingleFrankaRobotiqDeltaEefDataConfig(),
 }
-

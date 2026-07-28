@@ -18,6 +18,16 @@ from starVLA.model.modules.action_model.flow_matching_head.action_encoder import
     swish,
 )
 from starVLA.model.modules.action_model.flow_matching_head.cross_attention_dit import DiT
+from starVLA.model.modules.action_model.tactile_jepa import (
+    RAW_DIM,
+    REGION_GRIDS,
+    VALID_IDX,
+    DreamHead,
+    TactileEncoder,
+    build_ema_teacher,
+    ema_update,
+    jepa_loss,
+)
 
 # TODO try to meger DiT Modules with follow_match_head, they are just the same arch, but diff loss, use diffusers package will be simple
 
@@ -302,6 +312,79 @@ class FlowmatchingActionHead(nn.Module):
         self.num_timestep_buckets = config.num_timestep_buckets
         self.config = config
 
+        self.tactile_mode = str(config.get("tactile_mode", "notac")).lower()
+        if self.tactile_mode not in {"notac", "input", "dream"}:
+            raise ValueError(f"Unknown tactile_mode {self.tactile_mode!r}")
+        self.use_tactile = self.tactile_mode != "notac"
+        self.use_tactile_dream = self.tactile_mode == "dream"
+        self.dream_state = self.use_tactile_dream and bool(config.get("dream_state", False))
+        self.dream_vision = self.use_tactile_dream and bool(config.get("dream_vision", False))
+        self.dream_horizon = int(config.get("dream_horizon", 4))
+        self.vision_horizon = int(config.get("vision_horizon", self.dream_horizon))
+        self.ema_decay = float(config.get("ema_decay", 0.999))
+        self.jepa_beta = float(config.get("tactile_dream_beta", 1.0))
+        self.lambda_tactile = float(config.get("lambda_tactile", 0.5))
+        self.lambda_state = float(config.get("lambda_state", 0.5))
+        self.lambda_vision = float(config.get("lambda_vision", 0.5))
+
+        if self.use_tactile:
+            if not bool(self.model.config.interleave_self_attention):
+                raise ValueError(
+                    "tactile fusion requires diffusion_model_cfg.interleave_self_attention=true"
+                )
+            tactile_hidden_dim = int(config.get("tactile_hidden_dim", 512))
+            region_rows = tuple(config.get("tactile_region_rows", [rows for rows, _ in REGION_GRIDS]))
+            region_cols = tuple(config.get("tactile_region_cols", [cols for _, cols in REGION_GRIDS]))
+            if len(region_rows) != len(region_cols):
+                raise ValueError("tactile_region_rows and tactile_region_cols must have equal lengths")
+            encoder_type = str(config.get("tactile_encoder_type", "mlp"))
+            if encoder_type == "cnn" and bool(config.get("tactile_cnn_coord", False)):
+                encoder_type = "coord"
+            self.tactile_encoder = TactileEncoder(
+                embed_dim=self.input_embedding_dim,
+                hidden_dim=tactile_hidden_dim,
+                num_tokens=int(config.get("n_tactile_tokens", 8)),
+                num_heads=int(config.get("tactile_num_heads", 8)),
+                encoder_type=encoder_type,
+                cnn_channels=int(config.get("tactile_cnn_channels", 32)),
+                cnn_pool=tuple(config.get("tactile_cnn_pool", (2, 2))),
+                coord_scale=float(config.get("tactile_cnn_coord_scale", 0.1)),
+                raw_dim=int(config.get("tactile_raw_dim", RAW_DIM)),
+                valid_idx=tuple(config.get("tactile_valid_idx", VALID_IDX)),
+                region_grids=tuple(zip(region_rows, region_cols, strict=True)),
+            )
+
+        if self.use_tactile_dream:
+            dream_hidden_dim = int(config.get("dream_hidden_dim", self.hidden_size))
+            trunk_dim = int(self.model.config.output_dim)
+            self.tactile_target_encoder = build_ema_teacher(self.tactile_encoder)
+            self.tactile_dream_head = DreamHead(
+                trunk_dim,
+                self.input_embedding_dim,
+                self.dream_horizon,
+                dream_hidden_dim,
+            )
+            if self.dream_state:
+                if self.state_encoder is None:
+                    raise ValueError("dream_state requires a non-zero state_dim")
+                self.state_target_encoder = build_ema_teacher(self.state_encoder)
+                self.state_dream_head = DreamHead(
+                    trunk_dim,
+                    self.input_embedding_dim,
+                    self.dream_horizon,
+                    dream_hidden_dim,
+                )
+            if self.dream_vision:
+                self.vision_target_dim = int(
+                    config.get("vision_target_dim", config.diffusion_model_cfg.cross_attention_dim)
+                )
+                self.vision_dream_head = DreamHead(
+                    trunk_dim,
+                    self.vision_target_dim,
+                    self.vision_horizon,
+                    dream_hidden_dim,
+                )
+
     def sample_time(self, batch_size, device, dtype):
         sample = self.beta_dist.sample([batch_size]).to(device, dtype=dtype).clamp(max=self.config.noise_s)
         return (self.config.noise_s - sample) / self.config.noise_s
@@ -310,7 +393,14 @@ class FlowmatchingActionHead(nn.Module):
         return BatchFeature(data=batch)
 
     def forward(
-        self, vl_embs: torch.Tensor, actions: torch.Tensor, state: torch.Tensor = None, encoder_attention_mask=None
+        self,
+        vl_embs: torch.Tensor,
+        actions: torch.Tensor,
+        state: torch.Tensor = None,
+        tactile: torch.Tensor = None,
+        future_state: torch.Tensor = None,
+        future_vision_target: torch.Tensor = None,
+        encoder_attention_mask=None,
     ):
         """
         vl_embs: shape (B, seq_length, feature_dim)
@@ -332,6 +422,20 @@ class FlowmatchingActionHead(nn.Module):
 
         # embed state
         state_features = self.state_encoder(state) if state is not None else None
+        if state_features is not None and state_features.ndim == 2:
+            state_features = state_features.unsqueeze(1)
+
+        tactile_features = None
+        if self.use_tactile:
+            if tactile is None:
+                raise ValueError("tactile fusion training requires a current tactile frame")
+            if tactile.ndim == 2:
+                tactile_current = tactile
+            elif tactile.ndim == 3:
+                tactile_current = tactile[:, 0]
+            else:
+                raise ValueError(f"Expected tactile [B, 256] or [B, T, 256], got {tactile.shape}")
+            tactile_features = self.tactile_encoder(tactile_current)
 
         # Maybe add position embedding.
         if self.config.add_pos_embed:
@@ -341,11 +445,17 @@ class FlowmatchingActionHead(nn.Module):
 
         # state and action embedding along sequence dimension.
         future_tokens = self.future_tokens.weight.unsqueeze(0).expand(vl_embs.shape[0], -1, -1)
-        sa_embs = (
-            torch.cat((state_features, future_tokens, action_features), dim=1)
-            if state_features is not None
-            else torch.cat((future_tokens, action_features), dim=1)
-        )
+        token_groups = []
+        if state_features is not None:
+            token_groups.append(state_features)
+        token_groups.append(future_tokens)
+        tactile_slice = None
+        if tactile_features is not None:
+            tactile_start = sum(group.shape[1] for group in token_groups)
+            token_groups.append(tactile_features)
+            tactile_slice = slice(tactile_start, tactile_start + tactile_features.shape[1])
+        token_groups.append(action_features)
+        sa_embs = torch.cat(token_groups, dim=1)
 
         # Join VLM features with state and action embedding along sequence dimension.
         model_output = self.model(
@@ -359,14 +469,62 @@ class FlowmatchingActionHead(nn.Module):
         pred_actions = pred[:, -actions.shape[1] :]
 
         # Slice out only the action portion of pred and target.
-        loss = ((pred_actions - velocity) ** 2).mean()
-        return loss
+        action_loss = ((pred_actions - velocity) ** 2).mean()
+        if not self.use_tactile_dream:
+            return action_loss
+
+        expected_tactile_shape = (self.dream_horizon + 1, self.tactile_encoder.raw_dim)
+        if tactile.ndim != 3 or tactile.shape[1:] != expected_tactile_shape:
+            raise ValueError(
+                "tactile dream requires "
+                f"[B, {expected_tactile_shape[0]}, {self.tactile_encoder.raw_dim}], "
+                f"got {tactile.shape}"
+            )
+        if tactile_slice is None:
+            raise RuntimeError("Tactile token slice was not constructed")
+        tactile_trunk = model_output[:, tactile_slice].mean(dim=1)
+        with torch.no_grad():
+            tactile_target = self.tactile_target_encoder.encode_pooled(
+                tactile[:, 1 : 1 + self.dream_horizon]
+            )
+        losses = {
+            "action_loss": action_loss,
+            "tactile_loss": jepa_loss(
+                self.tactile_dream_head(tactile_trunk), tactile_target, beta=self.jepa_beta
+            ),
+        }
+
+        if self.dream_state:
+            expected = self.dream_horizon
+            if future_state is None or future_state.ndim != 3 or future_state.shape[1] != expected:
+                shape = None if future_state is None else tuple(future_state.shape)
+                raise ValueError(f"state-JEPA requires [B, {expected}, D], got {shape}")
+            with torch.no_grad():
+                state_target = self.state_target_encoder(future_state)
+            losses["state_jepa_loss"] = jepa_loss(
+                self.state_dream_head(tactile_trunk), state_target, beta=self.jepa_beta
+            )
+
+        if self.dream_vision:
+            expected = (self.vision_horizon, self.vision_target_dim)
+            if (
+                future_vision_target is None
+                or future_vision_target.ndim != 3
+                or future_vision_target.shape[1:] != expected
+            ):
+                shape = None if future_vision_target is None else tuple(future_vision_target.shape)
+                raise ValueError(f"vision-JEPA requires [B, {expected[0]}, {expected[1]}], got {shape}")
+            losses["vision_jepa_loss"] = jepa_loss(
+                self.vision_dream_head(tactile_trunk), future_vision_target, beta=self.jepa_beta
+            )
+        return losses
 
     @torch.no_grad()
     def predict_action(
         self,
         vl_embs: torch.Tensor,
         state: torch.Tensor = None,
+        tactile: torch.Tensor = None,
         encoder_attention_mask=None,
     ) -> torch.Tensor:
         # Set initial actions as the sampled noise.
@@ -382,6 +540,17 @@ class FlowmatchingActionHead(nn.Module):
         dt = 1.0 / num_steps
 
         state_features = self.state_encoder(state) if state is not None else None
+        if state_features is not None and state_features.ndim == 2:
+            state_features = state_features.unsqueeze(1)
+        tactile_features = None
+        if self.use_tactile:
+            if tactile is None:
+                tactile = torch.zeros(
+                    batch_size, self.tactile_encoder.raw_dim, dtype=vl_embs.dtype, device=device
+                )
+            elif tactile.ndim == 3:
+                tactile = tactile[:, 0]
+            tactile_features = self.tactile_encoder(tactile)
 
         # Run denoising steps.
         for t in range(num_steps):
@@ -399,11 +568,14 @@ class FlowmatchingActionHead(nn.Module):
 
             # Join vision, language, state and action embedding along sequence dimension.
             future_tokens = self.future_tokens.weight.unsqueeze(0).expand(vl_embs.shape[0], -1, -1)
-            sa_embs = (
-                torch.cat((state_features, future_tokens, action_features), dim=1)
-                if state_features is not None
-                else torch.cat((future_tokens, action_features), dim=1)
-            )
+            token_groups = []
+            if state_features is not None:
+                token_groups.append(state_features)
+            token_groups.append(future_tokens)
+            if tactile_features is not None:
+                token_groups.append(tactile_features)
+            token_groups.append(action_features)
+            sa_embs = torch.cat(token_groups, dim=1)
 
             # Run model forward.
             model_output = self.model(
@@ -419,6 +591,30 @@ class FlowmatchingActionHead(nn.Module):
             # Update actions using euler integration.
             actions = actions + dt * pred_velocity
         return actions
+
+    @torch.no_grad()
+    def sync_jepa_teachers(self) -> None:
+        if not self.use_tactile_dream:
+            return
+        self.tactile_target_encoder.load_state_dict(self.tactile_encoder.state_dict())
+        if self.dream_state:
+            self.state_target_encoder.load_state_dict(self.state_encoder.state_dict())
+
+    @torch.no_grad()
+    def update_jepa_teachers(self) -> None:
+        if not self.use_tactile_dream:
+            return
+        ema_update(self.tactile_target_encoder, self.tactile_encoder, self.ema_decay)
+        if self.dream_state:
+            ema_update(self.state_target_encoder, self.state_encoder, self.ema_decay)
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if self.use_tactile_dream:
+            self.tactile_target_encoder.eval()
+            if self.dream_state:
+                self.state_target_encoder.eval()
+        return self
 
     @property
     def device(self):

@@ -36,7 +36,11 @@ from starVLA.dataloader import build_dataloader
 from starVLA.model.framework.base_framework import build_framework
 from starVLA.model.framework.share_tools import apply_config_compat
 from starVLA.training.trainer_utils.config_tracker import AccessTrackedConfig, wrap_config
-from starVLA.training.trainer_utils.trainer_tools import TrainerUtils, build_param_lr_groups, setup_optimizer_and_scheduler, normalize_dotlist_args
+from starVLA.training.trainer_utils.trainer_tools import (
+    TrainerUtils,
+    build_param_lr_groups,
+    normalize_dotlist_args,
+)
 
 deepspeed_plugin = DeepSpeedPlugin()
 accelerator = Accelerator(deepspeed_plugin=deepspeed_plugin)
@@ -127,6 +131,11 @@ class VLATrainer(TrainerUtils):
         self._save_initial_configs()
 
         self._init_checkpointing()
+        if getattr(self, "_sync_jepa_teachers_after_load", False) and hasattr(
+            self.model, "sync_jepa_teachers"
+        ):
+            self.model.sync_jepa_teachers()
+            logger.info("Synchronized JEPA teachers from checkpoint-loaded online encoders")
         self._adjust_lr_scheduler_for_resume()
 
         freeze_modules = (
@@ -194,12 +203,16 @@ class VLATrainer(TrainerUtils):
         pretrained_checkpoint = getattr(self.config.trainer, "pretrained_checkpoint", None)
         is_resume = getattr(self.config.trainer, "is_resume", False)
         self.resume_from_checkpoint = pretrained_checkpoint
+        self._sync_jepa_teachers_after_load = False
 
         if is_resume:
             resume_from_checkpoint, self.completed_steps = self._get_latest_checkpoint(self.checkpoint_dir)
             if resume_from_checkpoint:
                 self.resume_from_checkpoint = resume_from_checkpoint
                 self.model = self.load_pretrained_backbones(self.model, self.resume_from_checkpoint, reload_modules=None)
+                self._sync_jepa_teachers_after_load = bool(
+                    getattr(self.model, "_jepa_teacher_keys_missing", False)
+                )
                 logger.info(
                     f"Resuming training from checkpoint: {self.resume_from_checkpoint}, steps: {self.completed_steps}"
                 )
@@ -213,6 +226,9 @@ class VLATrainer(TrainerUtils):
             self.model = self.load_pretrained_backbones(self.model, pretrained_checkpoint, reload_modules=reload_modules)
             self.completed_steps = 0
             self.resume_from_checkpoint = pretrained_checkpoint
+            self._sync_jepa_teachers_after_load = bool(
+                getattr(self.model, "_jepa_teacher_keys_missing", False)
+            )
             logger.info(f"Loaded pretrained checkpoint: {pretrained_checkpoint}, steps: {self.completed_steps}")
         else:
             logger.info("No pretrained checkpoint provided. Starting training from scratch.")
@@ -310,7 +326,8 @@ class VLATrainer(TrainerUtils):
             step_metrics = self._train_step(batch_vla)
             t_end_model = time.perf_counter()
 
-            if self.accelerator.sync_gradients:
+            completed_optimizer_step = self.accelerator.sync_gradients
+            if completed_optimizer_step:
                 progress_bar.update(1)
                 self.completed_steps += 1
 
@@ -322,7 +339,7 @@ class VLATrainer(TrainerUtils):
                     }
                 )
 
-            if self.completed_steps % self.config.trainer.eval_interval == 0:
+            if completed_optimizer_step and self.completed_steps % self.config.trainer.eval_interval == 0:
                 step_metrics = self.eval_action_model(step_metrics)
 
             step_metrics["timing/data"] = t_end_data - t_start_data
@@ -368,30 +385,41 @@ class VLATrainer(TrainerUtils):
     def _train_step(self, batch_vla, batch_vlm=None):
         """Execute single training step."""
         with self.accelerator.accumulate(self.model):
-            self.optimizer.zero_grad()
-
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 output_dict = self.model.forward(batch_vla)
                 action_loss = output_dict["action_loss"]
                 total_loss = action_loss
+                unwrapped_model = self.accelerator.unwrap_model(self.model)
+                loss_weights = (
+                    unwrapped_model.jepa_loss_weights()
+                    if hasattr(unwrapped_model, "jepa_loss_weights")
+                    else {}
+                )
+                for loss_name, weight in loss_weights.items():
+                    if loss_name in output_dict:
+                        total_loss = total_loss + float(weight) * output_dict[loss_name]
 
             self.accelerator.backward(total_loss)
 
-            if self.config.trainer.gradient_clipping is not None:
+            if self.accelerator.sync_gradients and self.config.trainer.gradient_clipping is not None:
                 self.accelerator.clip_grad_norm_(self.model.parameters(), self.config.trainer.gradient_clipping)
 
             self.optimizer.step()
-            # Only step the LR scheduler when gradients are actually synced
-            # (i.e., not mid-accumulation). Without this guard the scheduler
-            # runs gradient_accumulation_steps times faster than intended,
-            # causing warmup to end too early and cosine decay to bottom out
-            # at min_lr well before max_train_steps is reached.
-            if self.accelerator.sync_gradients:
+            optimizer_step_succeeded = not self.accelerator.optimizer_step_was_skipped
+            if self.accelerator.sync_gradients and optimizer_step_succeeded:
                 self.lr_scheduler.step()
+                if hasattr(unwrapped_model, "update_jepa_teachers"):
+                    unwrapped_model.update_jepa_teachers()
+            self.optimizer.zero_grad()
 
-        return {
+        metrics = {
             "action_dit_loss": action_loss.item(),
+            "total_loss": total_loss.item(),
         }
+        for loss_name in ("tactile_loss", "state_jepa_loss", "vision_jepa_loss"):
+            if loss_name in output_dict:
+                metrics[loss_name] = output_dict[loss_name].item()
+        return metrics
 
     def _finalize_training(self):
         """Training end processing."""

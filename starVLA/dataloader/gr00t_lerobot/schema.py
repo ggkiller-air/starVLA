@@ -117,6 +117,10 @@ class LeRobotModalityMetadata(BaseModel):
         default=None,
         description="The metadata for the annotation modality. The keys are the new names of each annotation modality.",
     )
+    tactile: dict[str, LeRobotModalityField] = Field(
+        default_factory=dict,
+        description="Raw tactile fields that are forwarded without state normalization.",
+    )
 
     def get_key_meta(self, key: str) -> LeRobotModalityField:
         """Get the metadata for a key in the LeRobot modality metadata.
@@ -163,6 +167,13 @@ class LeRobotModalityMetadata(BaseModel):
                     f"Key: {key}, annotation key {subkey} not found in metadata, available annotation keys: {self.annotation.keys()}"
                 )
             return self.annotation[subkey]
+        elif modality == "tactile":
+            if subkey not in self.tactile:
+                raise ValueError(
+                    f"Key: {key}, tactile key {subkey} not found in metadata, "
+                    f"available tactile keys: {self.tactile.keys()}"
+                )
+            return self.tactile[subkey]
         else:
             raise ValueError(f"Key: {key}, unexpected modality: {modality}")
 

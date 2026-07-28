@@ -69,6 +69,9 @@ class EmbodimentTag(Enum):
     """ The DOS-W1 single-arm robot.
     """
 
+    UNITREE_G1_SONIC = "unitree_g1_sonic"
+    """Unitree G1 controlled through the 78-D SONIC action interface."""
+
 # Embodiment tag string: to projector index in the Action Expert Module
 EMBODIMENT_TAG_MAPPING = {
     EmbodimentTag.NEW_EMBODIMENT.value: 31,
@@ -82,6 +85,7 @@ EMBODIMENT_TAG_MAPPING = {
     EmbodimentTag.UR5.value: 8,
     EmbodimentTag.ARX5.value: 9,
     EmbodimentTag.DOS_W1.value: 10,
+    EmbodimentTag.UNITREE_G1_SONIC.value: 11,
 }
 
 # Robot type to embodiment tag mapping
@@ -93,4 +97,5 @@ ROBOT_TYPE_TO_EMBODIMENT_TAG = {
     "demo_sim_franka_delta_joints": EmbodimentTag.FRANKA,
     "custom_robot_config": EmbodimentTag.NEW_EMBODIMENT,
     "fourier_gr1_arms_waist": EmbodimentTag.GR1,
+    "unitree_g1_sonic": EmbodimentTag.UNITREE_G1_SONIC,
 }

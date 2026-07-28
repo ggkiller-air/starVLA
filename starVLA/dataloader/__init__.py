@@ -1,14 +1,16 @@
 import json
 import os
-from accelerate.logging import get_logger
-import numpy as np
-from torch.utils.data import DataLoader
+from pathlib import Path
+
 import numpy as np
 import torch.distributed as dist
-from pathlib import Path
+from accelerate.logging import get_logger
+from torch.utils.data import DataLoader
+
 from starVLA.dataloader.vlm_datasets import make_vlm_dataloader
 
 logger = get_logger(__name__)
+
 
 def save_dataset_statistics(dataset_statistics, run_dir):
     """Saves a `dataset_statistics.json` file."""
@@ -30,13 +32,10 @@ def save_dataset_statistics(dataset_statistics, run_dir):
                     stats["num_transitions"] = stats["num_transitions"].item()
         json.dump(dataset_statistics, f_json, indent=2)
     logger.info(f"Saved dataset statistics file at path {out_path}")
-
-
-
-def build_dataloader(cfg, dataset_py="lerobot_datasets_oxe"): # TODO now here only is get dataset, we need mv dataloader to here
-
+def build_dataloader(cfg, dataset_py="lerobot_datasets_oxe"):
     if dataset_py == "lerobot_datasets":
-        from starVLA.dataloader.lerobot_datasets import get_vla_dataset, collate_fn
+        from starVLA.dataloader.lerobot_datasets import collate_fn, get_vla_dataset
+
         vla_dataset_cfg = cfg.datasets.vla_data
 
         vla_dataset = get_vla_dataset(
@@ -44,24 +43,23 @@ def build_dataloader(cfg, dataset_py="lerobot_datasets_oxe"): # TODO now here on
             balance_dataset_weights=vla_dataset_cfg.get("balance_dataset_weights", False),
             balance_trajectory_weights=vla_dataset_cfg.get("balance_trajectory_weights", False),
         )
-        
+
+        num_workers = int(vla_dataset_cfg.get("num_workers", 16))
         vla_train_dataloader = DataLoader(
             vla_dataset,
             batch_size=cfg.datasets.vla_data.per_device_batch_size,
             collate_fn=collate_fn,
-            num_workers=16,
+            num_workers=num_workers,
             pin_memory=True,
-            persistent_workers=True,
-            prefetch_factor=4,
+            persistent_workers=num_workers > 0,
+            prefetch_factor=4 if num_workers > 0 else None,
             # shuffle=True
-        )        
-        if dist.get_rank() == 0: 
-            
+        )
+        if not dist.is_initialized() or dist.get_rank() == 0:
             output_dir = Path(cfg.output_dir)
             vla_dataset.save_dataset_statistics(output_dir / "dataset_statistics.json")
         return vla_train_dataloader
-    elif dataset_py == "vlm_datasets":
+    if dataset_py == "vlm_datasets":
         vlm_data_module = make_vlm_dataloader(cfg)
-        vlm_train_dataloader = vlm_data_module["train_dataloader"]
-        
-        return vlm_train_dataloader
+        return vlm_data_module["train_dataloader"]
+    raise ValueError(f"Unsupported dataset_py: {dataset_py!r}")

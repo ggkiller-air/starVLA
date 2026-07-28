@@ -31,7 +31,9 @@ IGNORE_INDEX = -100
 
 from starVLA.model.framework.base_framework import baseframework
 from starVLA.model.framework.share_tools import merge_framework_config
+from starVLA.model.framework.VLM4A.gr00t_jepa import GR00TJEPAFrameworkMixin
 from starVLA.model.modules.action_model.GR00T_ActionHeader import FlowmatchingActionHead, get_action_model
+from starVLA.model.modules.action_model.tactile_jepa import REGION_GRIDS, VALID_IDX
 from starVLA.model.modules.vlm import get_vlm_model
 from starVLA.model.tools import FRAMEWORK_REGISTRY
 from starVLA.training.trainer_utils.trainer_tools import resize_images
@@ -76,6 +78,29 @@ class CosmosGR00TDefaultConfig:
             "num_timestep_buckets": 1000,
             "num_inference_timesteps": 4,
             "num_target_vision_tokens": 32,
+            "tactile_mode": "notac",
+            "tactile_encoder_type": "mlp",
+            "n_tactile_tokens": 8,
+            "tactile_hidden_dim": 512,
+            "tactile_num_heads": 8,
+            "tactile_cnn_channels": 32,
+            "tactile_cnn_pool": [2, 2],
+            "tactile_cnn_coord_scale": 0.1,
+            "tactile_raw_dim": 256,
+            "tactile_valid_idx": list(VALID_IDX),
+            "tactile_region_rows": [rows for rows, _ in REGION_GRIDS],
+            "tactile_region_cols": [cols for _, cols in REGION_GRIDS],
+            "tactile_cnn_coord": False,
+            "dream_horizon": 4,
+            "vision_horizon": 4,
+            "dream_hidden_dim": 1024,
+            "dream_state": False,
+            "dream_vision": False,
+            "ema_decay": 0.999,
+            "tactile_dream_beta": 1.0,
+            "lambda_tactile": 0.5,
+            "lambda_state": 0.5,
+            "lambda_vision": 0.5,
             "diffusion_model_cfg": {
                 "cross_attention_dim": 2048,
                 "dropout": 0.2,
@@ -91,7 +116,7 @@ class CosmosGR00TDefaultConfig:
 
 
 @FRAMEWORK_REGISTRY.register("CosmosGR00T")
-class Cosmos_GR00T(baseframework):
+class Cosmos_GR00T(GR00TJEPAFrameworkMixin, baseframework):
     """
     World-Model-for-Action framework (GR00T variant).
 
@@ -121,14 +146,11 @@ class Cosmos_GR00T(baseframework):
         # are normalised upstream by `share_tools.apply_config_compat`, so we
         # only ever read `action_horizon` here.
         self.action_horizon = int(self.config.framework.action_model.action_horizon)
+        self._init_gr00t_jepa()
 
     def forward(self, examples: List[dict] = None, **kwargs) -> Tuple:
         batch_images = [example["image"] for example in examples]
         instructions = [example["lang"] for example in examples]
-        actions = [example["action"] for example in examples]
-
-        state = [example["state"] for example in examples] if "state" in examples[0] else None
-
         qwen_inputs = self.qwen_vl_interface.build_qwenvl_inputs(images=batch_images, instructions=instructions)
         backbone_attention_mask = qwen_inputs.get("attention_mask", None)
         with torch.autocast("cuda", dtype=torch.bfloat16):
@@ -141,32 +163,7 @@ class Cosmos_GR00T(baseframework):
             last_hidden = qwenvl_outputs.hidden_states[-1]
 
         with torch.autocast("cuda", dtype=torch.float32):
-            actions = torch.tensor(np.array(actions), device=last_hidden.device, dtype=last_hidden.dtype)
-            actions_target = actions[:, -self.action_horizon :, :]
-
-            repeated_diffusion_steps = (
-                self.config.framework.action_model.get("repeated_diffusion_steps", 4)
-                if self.config and hasattr(self.config, "framework")
-                else 4
-            )
-            actions_target_repeated = actions_target.repeat(repeated_diffusion_steps, 1, 1)
-            last_hidden_repeated = last_hidden.repeat(repeated_diffusion_steps, 1, 1)
-            if backbone_attention_mask is not None:
-                backbone_attention_mask = backbone_attention_mask.repeat(repeated_diffusion_steps, 1).to(
-                    dtype=torch.bool
-                )
-
-            state_repeated = None
-            if state is not None:
-                state = torch.tensor(np.array(state), device=last_hidden.device, dtype=last_hidden.dtype)
-                state_repeated = state.repeat(repeated_diffusion_steps, 1, 1)
-
-            action_loss = self.action_model(
-                last_hidden_repeated, actions_target_repeated, state_repeated,
-                encoder_attention_mask=backbone_attention_mask,
-            )
-
-        return {"action_loss": action_loss}
+            return self._forward_gr00t_action(examples, last_hidden, backbone_attention_mask)
 
     @torch.inference_mode()
     def predict_action(self, examples: List[dict], **kwargs) -> np.ndarray:
@@ -174,8 +171,6 @@ class Cosmos_GR00T(baseframework):
             examples = [examples]
         batch_images = [to_pil_preserve(example["image"]) for example in examples]
         instructions = [example["lang"] for example in examples]
-        state = [example["state"] for example in examples] if "state" in examples[0] else None
-
         train_obs_image_size = getattr(self.config.datasets.vla_data, "obs_image_size", None)
         if train_obs_image_size:
             batch_images = resize_images(batch_images, target_size=train_obs_image_size)
@@ -193,15 +188,9 @@ class Cosmos_GR00T(baseframework):
             )
             last_hidden = qwenvl_outputs.hidden_states[-1]
 
-        state = (
-            torch.from_numpy(np.array(state)).to(last_hidden.device, dtype=last_hidden.dtype)
-            if state is not None
-            else None
-        )
-
         with torch.autocast("cuda", dtype=torch.float32):
-            pred_actions = self.action_model.predict_action(
-                last_hidden, state, encoder_attention_mask=backbone_attention_mask
+            pred_actions = self._predict_gr00t_action(
+                examples, last_hidden, backbone_attention_mask
             )
 
         normalized_actions = pred_actions.detach().cpu().numpy()

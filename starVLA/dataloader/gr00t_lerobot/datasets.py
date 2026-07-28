@@ -1379,10 +1379,11 @@ class LeRobotSingleDataset(Dataset):
     def _pack_sample(self, data: dict) -> dict:
         """Pack transformed modality data into training sample format."""
         step_images = []
+        video_windows = []
         for video_key in self.modality_keys["video"]:
-            image = data[video_key][0]
-            image = Image.fromarray(image).resize((224, 224))
-            step_images.append(image)
+            window = [Image.fromarray(image).resize((224, 224)) for image in data[video_key]]
+            step_images.append(window[0])
+            video_windows.append(window)
 
         language = data[self.modality_keys["language"][0]][0]
         action = []
@@ -1396,6 +1397,21 @@ class LeRobotSingleDataset(Dataset):
             "lang": language,
             "robot_tag": self.tag
         }
+
+        window_lengths = {len(window) for window in video_windows}
+        if len(window_lengths) != 1:
+            raise ValueError(f"Video view windows have different lengths: {sorted(window_lengths)}")
+        video_horizon = window_lengths.pop()
+        if video_horizon > 1:
+            sample["future_images"] = [
+                [video_windows[view][time] for view in range(len(video_windows))]
+                for time in range(1, video_horizon)
+            ]
+
+        tactile_keys = self.modality_keys.get("tactile", [])
+        if tactile_keys:
+            tactile = np.concatenate([data[key] for key in tactile_keys], axis=1)
+            sample["tactile"] = tactile.astype(np.uint8, copy=False)
 
         if self.data_cfg is not None and self.data_cfg.get("include_state", False) not in ["False", False]:
             state = []
@@ -1743,6 +1759,24 @@ class LeRobotSingleDataset(Dataset):
             # padding_strategy="zero",           # HACK for realdata
         )
 
+    def get_tactile(self, trajectory_id: int, key: str, base_index: int) -> np.ndarray:
+        """Read a raw tactile window and pad only within the current episode."""
+        step_indices = self.delta_indices[key] + base_index
+        trajectory_index = self.get_trajectory_index(trajectory_id)
+        max_length = self.trajectory_lengths[trajectory_index]
+        subkey = key.removeprefix("tactile.")
+        tactile_meta = self.lerobot_modality_meta.tactile[subkey]
+        original_key = tactile_meta.original_key or subkey
+        if self.curr_traj_data is None or original_key not in self.curr_traj_data.columns:
+            raise KeyError(f"No tactile column {original_key!r} in trajectory {trajectory_id}")
+        raw = np.stack(self.curr_traj_data[original_key]).astype(np.uint8, copy=False)
+        return self.retrieve_data_and_pad(
+            array=raw,
+            step_indices=step_indices,
+            max_length=max_length,
+            padding_strategy="first_last",
+        )
+
     def get_language(
         self,
         trajectory_id: int,
@@ -1815,6 +1849,8 @@ class LeRobotSingleDataset(Dataset):
             return self.get_video(trajectory_id, key, base_index)
         elif modality == "state" or modality == "action":
             return self.get_state_or_action(trajectory_id, modality, key, base_index)
+        elif modality == "tactile":
+            return self.get_tactile(trajectory_id, key, base_index)
         elif modality == "language":
             return self.get_language(trajectory_id, key, base_index)
         else:

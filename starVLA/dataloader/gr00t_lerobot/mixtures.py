@@ -12,6 +12,10 @@ from typing import Dict, List, Tuple
 ## {nakename: [(data_name, sampling_weight, robot_type)] }
 DATASET_NAMED_MIXTURES = {
 
+    "carry_bucket_stereo": [
+        ("carry-bucket-stereo", 1.0, "unitree_g1_sonic"),
+    ],
+
     "custom_dataset": [
         ("custom_dataset_name", 1.0, "custom_robot_config"),
     ],

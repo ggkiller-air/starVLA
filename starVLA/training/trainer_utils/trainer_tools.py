@@ -129,7 +129,7 @@ def build_param_lr_groups(model, cfg):
             for attr in module_name.split("."):
                 module = getattr(module, attr)
             # filter out frozen parameters
-            params = [p for p in module.parameters() if id(p) not in frozen_params]
+            params = [p for p in module.parameters() if p.requires_grad and id(p) not in frozen_params]
             if params:  # only add param group if there are trainable parameters
                 param_groups.append({"params": params, "lr": lr, "name": module_name})
                 used_params.update(id(p) for p in params)
@@ -137,7 +137,11 @@ def build_param_lr_groups(model, cfg):
             ReferenceError(f"⚠️ module path `{module_name}` not found in vla")
 
     # assign base learning rate to the remaining unused parameters (exclude frozen ones)
-    other_params = [p for p in model.parameters() if id(p) not in used_params and id(p) not in frozen_params]
+    other_params = [
+        p
+        for p in model.parameters()
+        if p.requires_grad and id(p) not in used_params and id(p) not in frozen_params
+    ]
     if other_params:
         param_groups.append({"params": other_params, "lr": base_lr, "name": "base"})
 
@@ -292,7 +296,11 @@ class TrainerUtils:
                     print(f"❌ cannot find module path: {path}")
         else:  # full load
             try:
-                model.load_state_dict(checkpoint, strict=False)
+                incompatible = model.load_state_dict(checkpoint, strict=False)
+                if hasattr(model, "validate_jepa_checkpoint_keys"):
+                    model.validate_jepa_checkpoint_keys(
+                        incompatible.missing_keys, incompatible.unexpected_keys
+                    )
                 if dist.get_rank() == 0:
                     print("✅ loaded <full_model> model parameters")
                 loaded_modules = ["<full_model>"]
