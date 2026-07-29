@@ -22,48 +22,44 @@ Action and auxiliary-target masks exclude repeated episode-tail padding from eve
 
 ```bash
 cd /root/Projects/starVLA
-conda create -n starvla python=3.10 -y
-conda activate starvla
-pip install -r requirements.txt
-pip install flash-attn --no-build-isolation
-pip install -e .
+uv venv --python 3.10 .venv
+uv pip install --python .venv/bin/python -r requirements.txt
+uv pip install --python .venv/bin/python -e .
+source .venv/bin/activate
 ```
 
-Verify the dataset and environment without allocating a GPU:
+## Full training
 
-```bash
-CUDA_VISIBLE_DEVICES='' PYTHONPATH=. pytest -q \
-  tests/test_sonic_configs.py tests/test_sonic_data.py tests/test_sonic_deployment.py
-```
-
-## Train
-
-Check `nvidia-smi` first and select only idle GPUs. The fixed configs point at
-`../data/carry-bucket-stereo` from this repository and use one sample per GPU.
+The fixed configs contain 20k steps, checkpoints at 10k and 20k, four workers per rank,
+and the measured throughput-optimal batch of 4 per GPU (global batch 16).
 
 ```bash
 cd /root/Projects/starVLA
+source .venv/bin/activate
+export CUDA_VISIBLE_DEVICES=0,1,2,3
 
 # No Tactile
-CUDA_VISIBLE_DEVICES=2,3 accelerate launch --num_processes 2 \
+accelerate launch --config_file starVLA/config/deepseeds/deepspeed_zero2.yaml \
+  --num_processes 4 \
   starVLA/training/train_starvla.py \
   --config_yaml examples/Sonic/train_files/starvla_train_sonic_notactile.yaml
 
 # HTD: current tactile fusion plus future-tactile teacher
-CUDA_VISIBLE_DEVICES=2,3 accelerate launch --num_processes 2 \
+accelerate launch --config_file starVLA/config/deepseeds/deepspeed_zero2.yaml \
+  --num_processes 4 \
   starVLA/training/train_starvla.py \
   --config_yaml examples/Sonic/train_files/starvla_train_sonic_htd.yaml
 
 # UniVLaT/JEPA: HTD plus future-state and future-stereo teachers
-CUDA_VISIBLE_DEVICES=2,3 accelerate launch --num_processes 2 \
+accelerate launch --config_file starVLA/config/deepseeds/deepspeed_zero2.yaml \
+  --num_processes 4 \
   starVLA/training/train_starvla.py \
   --config_yaml examples/Sonic/train_files/starvla_train_sonic_jepa.yaml
 ```
 
-For a short environment check, append `--trainer.max_train_steps 2
---trainer.save_interval 2 --trainer.eval_interval 100` to a command. Full checkpoints are
-written under `results/Checkpoints/sonic_<mode>/checkpoints/steps_<step>_pytorch_model.pt`;
-the completed model is in `results/Checkpoints/sonic_<mode>/final_model/`.
+Checkpoints are written under
+`results/Checkpoints/sonic_<mode>/checkpoints/steps_<step>_pytorch_model.pt`; the completed
+model is in `results/Checkpoints/sonic_<mode>/final_model/`.
 
 ## Deploy through SONIC
 
@@ -75,7 +71,7 @@ Terminal 1, start the starVLA websocket backend (port 8000):
 
 ```bash
 cd /root/Projects/starVLA
-conda activate starvla
+source .venv/bin/activate
 python -m deployment.model_server.server_sonic_policy \
   --ckpt-path results/Checkpoints/sonic_jepa/final_model/pytorch_model.pt \
   --device cuda:0 --use-bf16 --port 8000

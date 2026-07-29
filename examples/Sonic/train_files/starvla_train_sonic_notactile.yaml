@@ -65,7 +65,7 @@ datasets:
     lerobot_version: v2.0
     action_mode: abs
     include_state: true
-    per_device_batch_size: 1
+    per_device_batch_size: 4
     num_workers: 4
     obs_image_size: [224, 224]
     video_backend: torchvision_av
