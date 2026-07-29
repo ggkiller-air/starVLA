@@ -1103,6 +1103,21 @@ class UnitreeG1SonicDataConfig:
     ]
     language_keys = ["annotation.human.task_description"]
     action_indices = list(range(40))
+    state_key_dims = {
+        "state.left_leg": 6,
+        "state.right_leg": 6,
+        "state.waist": 3,
+        "state.left_arm": 7,
+        "state.right_arm": 7,
+        "state.left_hand": 7,
+        "state.right_hand": 7,
+        "state.projected_gravity": 3,
+    }
+    action_key_dims = {
+        "action.motion_token": 64,
+        "action.left_hand_joints": 7,
+        "action.right_hand_joints": 7,
+    }
 
     def modality_config(self):
         return self.modality_config_for({})

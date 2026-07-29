@@ -353,6 +353,35 @@ class PolicyNormProcessor:
     # ------------------------------------------------------------------
     # Inverse path (model output → env action)
     # ------------------------------------------------------------------
+    def apply_state(self, state: np.ndarray) -> np.ndarray:
+        """Normalize a canonical flat state with the training-time transforms."""
+        state = np.asarray(state, dtype=np.float32)
+        if state.ndim not in (1, 2):
+            raise ValueError(f"Expected state [D] or [T, D], got {state.shape}")
+        expected_dim = sum(self._state_key_dims[key] for key in self._state_keys)
+        if state.shape[-1] != expected_dim:
+            raise ValueError(
+                f"State width {state.shape[-1]} does not match checkpoint width {expected_dim}"
+            )
+        if not np.isfinite(state).all():
+            raise ValueError("State contains NaN or infinity")
+
+        data: Dict[str, np.ndarray] = {}
+        cursor = 0
+        for full_key in self._state_keys:
+            dim_k = self._state_key_dims[full_key]
+            data[full_key] = state[..., cursor : cursor + dim_k]
+            cursor += dim_k
+        out = self._transform.apply(data)
+
+        parts: List[np.ndarray] = []
+        for full_key in self._state_keys:
+            value = out[full_key]
+            if isinstance(value, torch.Tensor):
+                value = value.detach().cpu().numpy()
+            parts.append(np.asarray(value))
+        return np.concatenate(parts, axis=-1).astype(np.float32, copy=False)
+
     def unapply_actions(self, normalized_actions: np.ndarray) -> np.ndarray:
         """Invert action normalization using the training-time pipeline.
 

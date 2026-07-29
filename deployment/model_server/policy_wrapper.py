@@ -27,10 +27,9 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import torch
 
+from deployment.model_server.policy_norm_processor import PolicyNormProcessor
 from starVLA.model.framework.base_framework import baseframework
 from starVLA.model.framework.share_tools import read_mode_config
-
-from deployment.model_server.policy_norm_processor import PolicyNormProcessor
 
 
 class PolicyServerWrapper:
@@ -58,14 +57,15 @@ class PolicyServerWrapper:
 
         # action_chunk_size = future_action_window_size + 1 (matches old client).
         action_model_cfg = model_cfg["framework"]["action_model"]
-        
+
         if "action_horizon" in action_model_cfg:
             self._action_chunk_size = int(action_model_cfg["action_horizon"])
         elif "future_action_window_size" in action_model_cfg:
             self._action_chunk_size = int(action_model_cfg["future_action_window_size"]) + 1
         else:
             raise ValueError(
-                f"PolicyServerWrapper: no action_horizon or future_action_window_size found in model config for {self._ckpt_path}"
+                "PolicyServerWrapper: no action_horizon or future_action_window_size "
+                f"found in model config for {self._ckpt_path}"
             )
         # Cache of PolicyNormProcessor instances per unnorm_key.
         # For single-dataset ckpts unnorm_key is auto-selected; for multi-dataset
@@ -160,3 +160,12 @@ class PolicyServerWrapper:
             axis=0,
         )
         return {"actions": unnorm}
+
+    def normalize_state(
+        self,
+        state: np.ndarray,
+        unnorm_key: Optional[str] = None,
+    ) -> np.ndarray:
+        """Normalize a raw state with the same transform used during training."""
+        effective_key = unnorm_key if unnorm_key is not None else self._default_unnorm_key
+        return self._get_processor(effective_key).apply_state(state)
