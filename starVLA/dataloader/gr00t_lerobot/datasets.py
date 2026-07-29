@@ -1374,9 +1374,15 @@ class LeRobotSingleDataset(Dataset):
         trajectory_id, base_index = self.all_steps[index]
         raw_data = self.get_step_data(trajectory_id, base_index)
         data = self.transforms(raw_data)
-        return self._pack_sample(data)
+        return self._pack_sample(data, trajectory_id=trajectory_id, base_index=base_index)
 
-    def _pack_sample(self, data: dict) -> dict:
+    def _pack_sample(
+        self,
+        data: dict,
+        *,
+        trajectory_id: int | None = None,
+        base_index: int | None = None,
+    ) -> dict:
         """Pack transformed modality data into training sample format."""
         step_images = []
         video_windows = []
@@ -1393,10 +1399,35 @@ class LeRobotSingleDataset(Dataset):
 
         sample = {
             "action": action,
+            "action_mask": np.ones_like(action, dtype=bool),
             "image": step_images,
             "lang": language,
             "robot_tag": self.tag
         }
+
+        def _time_mask(modality: str) -> np.ndarray | None:
+            if trajectory_id is None or base_index is None:
+                return None
+            keys = self.modality_keys.get(modality, [])
+            if not keys:
+                return None
+            deltas = np.asarray(self.delta_indices[keys[0]], dtype=np.int64)
+            for key in keys[1:]:
+                if not np.array_equal(deltas, self.delta_indices[key]):
+                    raise ValueError(f"{modality} keys must share delta indices")
+            trajectory_index = self.get_trajectory_index(trajectory_id)
+            trajectory_length = int(self.trajectory_lengths[trajectory_index])
+            indices = int(base_index) + deltas
+            return np.logical_and(indices >= 0, indices < trajectory_length)
+
+        action_time_mask = _time_mask("action")
+        if action_time_mask is not None:
+            if action_time_mask.shape != (action.shape[0],):
+                raise ValueError(
+                    f"Action time mask must have shape {(action.shape[0],)}, "
+                    f"got {action_time_mask.shape}"
+                )
+            sample["action_mask"] &= action_time_mask[:, None]
 
         window_lengths = {len(window) for window in video_windows}
         if len(window_lengths) != 1:
@@ -1407,11 +1438,17 @@ class LeRobotSingleDataset(Dataset):
                 [video_windows[view][time] for view in range(len(video_windows))]
                 for time in range(1, video_horizon)
             ]
+            vision_time_mask = _time_mask("video")
+            if vision_time_mask is not None:
+                sample["vision_future_mask"] = vision_time_mask[1:]
 
         tactile_keys = self.modality_keys.get("tactile", [])
         if tactile_keys:
             tactile = np.concatenate([data[key] for key in tactile_keys], axis=1)
             sample["tactile"] = tactile.astype(np.uint8, copy=False)
+            tactile_time_mask = _time_mask("tactile")
+            if tactile_time_mask is not None and tactile_time_mask.size > 1:
+                sample["tactile_future_mask"] = tactile_time_mask[1:]
 
         if self.data_cfg is not None and self.data_cfg.get("include_state", False) not in ["False", False]:
             state = []
@@ -1428,6 +1465,9 @@ class LeRobotSingleDataset(Dataset):
             else:
                 state = np.concatenate(state, axis=1).astype(np.float16)
                 sample["state"] = state
+                state_time_mask = _time_mask("state")
+                if state_time_mask is not None and state_time_mask.size > 1:
+                    sample["state_future_mask"] = state_time_mask[1:]
 
         return sample
 
@@ -2419,7 +2459,11 @@ class LeRobotMixtureDataset(Dataset):
                     
                 raw_data = dataset.get_step_data(trajectory_id, step)    
                 data = dataset.transforms(raw_data)
-                sample = dataset._pack_sample(data)
+                sample = dataset._pack_sample(
+                    data,
+                    trajectory_id=trajectory_id,
+                    base_index=step,
+                )
                 
                 return sample
                 

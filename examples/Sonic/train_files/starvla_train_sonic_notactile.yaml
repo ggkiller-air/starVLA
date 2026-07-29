@@ -1,5 +1,5 @@
-# Table 1: UniVLaT/JEPA. HTD plus future state and future stereo objectives.
-run_id: sonic_jepa
+# Table 1: No Tactile. No tactile input and no future-observation objectives.
+run_id: sonic_notactile
 run_root_dir: results/Checkpoints
 seed: 42
 wandb_entity: wang-zih23
@@ -30,7 +30,7 @@ framework:
     num_inference_timesteps: 4
     num_target_vision_tokens: 32
 
-    tactile_mode: dream
+    tactile_mode: notac
     tactile_encoder_type: mlp
     n_tactile_tokens: 8
     tactile_hidden_dim: 512
@@ -38,8 +38,8 @@ framework:
     dream_horizon: 4
     vision_horizon: 4
     dream_hidden_dim: 1024
-    dream_state: true
-    dream_vision: true
+    dream_state: false
+    dream_vision: false
     vision_target_dim: 2048
     ema_decay: 0.999
     tactile_dream_beta: 1.0
@@ -70,10 +70,10 @@ datasets:
     obs_image_size: [224, 224]
     video_backend: torchvision_av
     delete_pause_frame: false
-    tactile_mode: dream
+    tactile_mode: notac
     dream_horizon: 4
-    dream_state: true
-    dream_vision: true
+    dream_state: false
+    dream_vision: false
     vision_horizon: 4
 
 trainer:

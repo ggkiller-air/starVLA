@@ -1,0 +1,104 @@
+# starVLA SONIC tactile training
+
+This branch provides the three Table 1 modes from one codebase. Future observations are
+training-only teacher targets; action prediction always conditions on the prompt, current
+46-D state, current stereo pair, and current tactile packet only when tactile is enabled.
+
+| Config | Current tactile | Future tactile | Future state | Future stereo |
+|---|---:|---:|---:|---:|
+| No Tactile | no | no | no | no |
+| HTD | yes | yes | no | no |
+| UniVLaT/JEPA | yes | yes | yes | yes |
+
+The legacy `tactile_mode: input` remains available as a current-tactile-only ablation, but
+it is not HTD. HTD uses `tactile_mode: dream` with both other dream flags disabled.
+
+HTD is short for *Humanoid Transformer with Touch Dreaming* (arXiv:2604.13015). In this
+port, HTD mode names the current-tactile fusion and future-tactile latent objective; it is
+not a claim that starVLA reproduces the paper's complete policy and controller system.
+Action and auxiliary-target masks exclude repeated episode-tail padding from every loss.
+
+## Environment
+
+```bash
+cd /root/Projects/starVLA
+conda create -n starvla python=3.10 -y
+conda activate starvla
+pip install -r requirements.txt
+pip install flash-attn --no-build-isolation
+pip install -e .
+```
+
+Verify the dataset and environment without allocating a GPU:
+
+```bash
+CUDA_VISIBLE_DEVICES='' PYTHONPATH=. pytest -q \
+  tests/test_sonic_configs.py tests/test_sonic_data.py tests/test_sonic_deployment.py
+```
+
+## Train
+
+Check `nvidia-smi` first and select only idle GPUs. The fixed configs point at
+`../data/carry-bucket-stereo` from this repository and use one sample per GPU.
+
+```bash
+cd /root/Projects/starVLA
+
+# No Tactile
+CUDA_VISIBLE_DEVICES=2,3 accelerate launch --num_processes 2 \
+  starVLA/training/train_starvla.py \
+  --config_yaml examples/Sonic/train_files/starvla_train_sonic_notactile.yaml
+
+# HTD: current tactile fusion plus future-tactile teacher
+CUDA_VISIBLE_DEVICES=2,3 accelerate launch --num_processes 2 \
+  starVLA/training/train_starvla.py \
+  --config_yaml examples/Sonic/train_files/starvla_train_sonic_htd.yaml
+
+# UniVLaT/JEPA: HTD plus future-state and future-stereo teachers
+CUDA_VISIBLE_DEVICES=2,3 accelerate launch --num_processes 2 \
+  starVLA/training/train_starvla.py \
+  --config_yaml examples/Sonic/train_files/starvla_train_sonic_jepa.yaml
+```
+
+For a short environment check, append `--trainer.max_train_steps 2
+--trainer.save_interval 2 --trainer.eval_interval 100` to a command. Full checkpoints are
+written under `results/Checkpoints/sonic_<mode>/checkpoints/steps_<step>_pytorch_model.pt`;
+the completed model is in `results/Checkpoints/sonic_<mode>/final_model/`.
+
+## Deploy through SONIC
+
+The backend returns a finite `float32[40,78]` chunk laid out as 64 SONIC motion-token
+values followed by 7 left-hand and 7 right-hand values. SONIC, not starVLA, decodes the
+motion token into G1 whole-body control.
+
+Terminal 1, start the starVLA websocket backend (port 8000):
+
+```bash
+cd /root/Projects/starVLA
+conda activate starvla
+python -m deployment.model_server.server_sonic_policy \
+  --ckpt-path results/Checkpoints/sonic_jepa/final_model/pytorch_model.pt \
+  --device cuda:0 --use-bf16 --port 8000
+```
+
+Terminal 2, expose that backend through the Isaac-GR00T ZMQ PolicyServer (port 5550):
+
+```bash
+cd /root/Projects/Isaac-GR00T
+uv run --no-sync python gr00t/eval/run_sonic_bridge_server.py \
+  --backend-host 127.0.0.1 --backend-port 8000 \
+  --host 0.0.0.0 --port 5550
+```
+
+Terminal 3, launch the shared controller and inference client:
+
+```bash
+cd /root/Projects/GR00T-WholeBodyControl
+python gear_sonic/scripts/launch_inference.py \
+  --policy-host 127.0.0.1 --policy-port 5550 \
+  --camera-host 192.168.123.164 \
+  --tactile-zmq-host 192.168.123.164 \
+  --prompt "carry the bucket"
+```
+
+For a No Tactile checkpoint, omit `--tactile-zmq-host` and add `--no-use-tactile`.

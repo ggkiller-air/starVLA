@@ -13,6 +13,7 @@ from starVLA.model.modules.action_model.tactile_jepa import (
     TactileEncoder,
     build_ema_teacher,
     ema_update,
+    jepa_loss,
 )
 
 
@@ -137,6 +138,80 @@ def test_dream_mode_returns_all_losses_and_never_grads_teachers():
     teachers = (model.tactile_target_encoder, model.state_target_encoder)
     assert all(parameter.grad is None for teacher in teachers for parameter in teacher.parameters())
     assert any(parameter.grad is not None for parameter in model.tactile_dream_head.parameters())
+
+
+def test_htd_returns_only_action_and_future_tactile_losses():
+    model = FlowmatchingActionHead(_action_config(mode="dream"))
+    output = model(
+        torch.randn(2, 7, 64),
+        torch.randn(2, 4, 6),
+        torch.randn(2, 1, 5),
+        tactile=torch.randint(0, 256, (2, 3, RAW_DIM), dtype=torch.uint8),
+    )
+    assert set(output) == {"action_loss", "tactile_loss"}
+
+
+def test_time_masks_remove_episode_padding_from_losses():
+    prediction = torch.tensor([[[1.0, 0.0], [0.0, 1.0]]])
+    first_target = torch.tensor([[[1.0, 0.0], [1.0, 0.0]]])
+    second_target = first_target.clone()
+    second_target[:, 1] = torch.tensor([-10.0, 7.0])
+    future_mask = torch.tensor([[True, False]])
+    assert torch.equal(
+        jepa_loss(prediction, first_target, mask=future_mask),
+        jepa_loss(prediction, second_target, mask=future_mask),
+    )
+
+    model = FlowmatchingActionHead(_action_config(mode="notac"))
+    vl_embs = torch.randn(2, 7, 64)
+    state = torch.randn(2, 1, 5)
+    first_actions = torch.randn(2, 4, 6)
+    second_actions = first_actions.clone()
+    second_actions[:, -1] = 1000
+    action_mask = torch.ones_like(first_actions)
+    action_mask[:, -1] = 0
+    torch.manual_seed(456)
+    first_loss = model(
+        vl_embs,
+        first_actions,
+        state,
+        action_mask=action_mask,
+    )
+    torch.manual_seed(456)
+    second_loss = model(
+        vl_embs,
+        second_actions,
+        state,
+        action_mask=action_mask,
+    )
+    assert torch.equal(first_loss, second_loss)
+
+
+def test_future_targets_do_not_condition_action_prediction():
+    model = FlowmatchingActionHead(_action_config(mode="dream", dream_state=True, dream_vision=True))
+    model.eval()
+    vl_embs = torch.randn(2, 7, 64)
+    actions = torch.randn(2, 4, 6)
+    current_state = torch.randn(2, 1, 5)
+    current_tactile = torch.randint(0, 256, (2, 1, RAW_DIM), dtype=torch.uint8)
+
+    def forward_with_future(fill):
+        tactile = torch.cat(
+            (current_tactile, torch.full((2, 2, RAW_DIM), fill, dtype=torch.uint8)), dim=1
+        )
+        torch.manual_seed(123)
+        return model(
+            vl_embs,
+            actions,
+            current_state,
+            tactile=tactile,
+            future_state=torch.full((2, 2, 5), float(fill)),
+            future_vision_target=torch.full((2, 2, 64), float(fill)),
+        )
+
+    first = forward_with_future(0)
+    second = forward_with_future(255)
+    assert torch.equal(first["action_loss"], second["action_loss"])
 
 
 def test_dream_mode_fails_fast_without_future_targets():

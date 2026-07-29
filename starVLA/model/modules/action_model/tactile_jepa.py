@@ -298,12 +298,23 @@ class DreamHead(nn.Module):
         return output.reshape(output.shape[0], self.horizon, self.target_dim)
 
 
-def jepa_loss(prediction: torch.Tensor, target: torch.Tensor, beta: float = 1.0) -> torch.Tensor:
+def jepa_loss(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    beta: float = 1.0,
+    mask: torch.Tensor | None = None,
+) -> torch.Tensor:
     prediction = prediction.float()
     target = target.detach().float()
     direction = 1.0 - F.cosine_similarity(prediction, target, dim=-1)
     magnitude = F.smooth_l1_loss(prediction.norm(dim=-1), target.norm(dim=-1), reduction="none")
-    return (direction + beta * magnitude).mean()
+    loss = direction + beta * magnitude
+    if mask is None:
+        return loss.mean()
+    mask = mask.to(device=loss.device, dtype=loss.dtype)
+    if mask.shape != loss.shape:
+        raise ValueError(f"JEPA mask shape {tuple(mask.shape)} does not match loss {tuple(loss.shape)}")
+    return (loss * mask).sum() / mask.sum().clamp_min(1.0)
 
 
 def build_ema_teacher(student: nn.Module) -> nn.Module:

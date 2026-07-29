@@ -143,6 +143,9 @@ class GR00TJEPAFrameworkMixin:
         device, dtype = last_hidden.device, last_hidden.dtype
         actions = torch.as_tensor(np.asarray([example["action"] for example in examples]), device=device, dtype=dtype)
         actions = actions[:, -self.action_horizon :]
+        action_mask = self._tensorize_optional(examples, "action_mask", device, dtype)
+        if action_mask is not None:
+            action_mask = action_mask[:, -self.action_horizon :]
         repeats = int(self.config.framework.action_model.get("repeated_diffusion_steps", 4))
 
         state_window = self._tensorize_optional(examples, "state", device, dtype)
@@ -164,6 +167,15 @@ class GR00TJEPAFrameworkMixin:
         tactile = self._tensorize_optional(examples, "tactile", device, dtype)
         if self.action_model.use_tactile and tactile is None:
             raise ValueError("Active tactile mode requires the tactile key in every training sample")
+        tactile_future_mask = self._tensorize_optional(
+            examples, "tactile_future_mask", device, dtype
+        )
+        state_future_mask = self._tensorize_optional(
+            examples, "state_future_mask", device, dtype
+        )
+        vision_future_mask = self._tensorize_optional(
+            examples, "vision_future_mask", device, dtype
+        )
 
         future_vision = None
         if self.action_model.dream_vision:
@@ -182,6 +194,10 @@ class GR00TJEPAFrameworkMixin:
             tactile=repeat(tactile),
             future_state=repeat(future_state),
             future_vision_target=repeat(future_vision),
+            action_mask=repeat(action_mask),
+            tactile_future_mask=repeat(tactile_future_mask),
+            state_future_mask=repeat(state_future_mask),
+            vision_future_mask=repeat(vision_future_mask),
             encoder_attention_mask=repeated_mask,
         )
         return {"action_loss": output} if torch.is_tensor(output) else output

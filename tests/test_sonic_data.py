@@ -48,8 +48,12 @@ def test_sonic_modalities_follow_ablation_mode():
 @pytest.mark.parametrize(
     ("mode", "expected_keys", "tactile_shape"),
     [
-        ("notac", {"action", "image", "lang", "robot_tag", "state"}, None),
-        ("input", {"action", "image", "lang", "robot_tag", "state", "tactile"}, (1, 256)),
+        ("notac", {"action", "action_mask", "image", "lang", "robot_tag", "state"}, None),
+        (
+            "input",
+            {"action", "action_mask", "image", "lang", "robot_tag", "state", "tactile"},
+            (1, 256),
+        ),
     ],
 )
 def test_real_sonic_ablation_samples(mode, expected_keys, tactile_shape):
@@ -88,6 +92,10 @@ def test_real_sonic_sample_and_episode_tail_padding():
     assert first["state"].shape == (5, 46)
     assert first["tactile"].shape == (5, 256)
     assert first["tactile"].dtype == np.uint8
+    assert first["action_mask"].all()
+    assert first["tactile_future_mask"].all()
+    assert first["state_future_mask"].all()
+    assert first["vision_future_mask"].all()
     assert len(first["image"]) == 2
     assert len(first["future_images"]) == 4
     assert all(len(frame) == 2 for frame in first["future_images"])
@@ -96,3 +104,8 @@ def test_real_sonic_sample_and_episode_tail_padding():
     current_images = [np.asarray(image) for image in tail["image"]]
     for frame in tail["future_images"]:
         assert all(np.array_equal(current_images[view], np.asarray(frame[view])) for view in range(2))
+    assert tail["action_mask"][0].all()
+    assert not tail["action_mask"][1:].any()
+    assert not tail["tactile_future_mask"].any()
+    assert not tail["state_future_mask"].any()
+    assert not tail["vision_future_mask"].any()

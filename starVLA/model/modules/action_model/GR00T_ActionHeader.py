@@ -400,6 +400,10 @@ class FlowmatchingActionHead(nn.Module):
         tactile: torch.Tensor = None,
         future_state: torch.Tensor = None,
         future_vision_target: torch.Tensor = None,
+        action_mask: torch.Tensor = None,
+        tactile_future_mask: torch.Tensor = None,
+        state_future_mask: torch.Tensor = None,
+        vision_future_mask: torch.Tensor = None,
         encoder_attention_mask=None,
     ):
         """
@@ -409,7 +413,17 @@ class FlowmatchingActionHead(nn.Module):
         device = vl_embs.device
 
         # Embed noised action trajectory.
+        if action_mask is not None:
+            action_mask = action_mask.to(device=actions.device, dtype=actions.dtype)
+            if action_mask.shape != actions.shape:
+                raise ValueError(
+                    f"Action mask shape {tuple(action_mask.shape)} does not match "
+                    f"actions {tuple(actions.shape)}"
+                )
+            actions = actions * action_mask
         noise = torch.randn(actions.shape, device=actions.device, dtype=actions.dtype)
+        if action_mask is not None:
+            noise = noise * action_mask
         t = self.sample_time(actions.shape[0], device=actions.device, dtype=actions.dtype)
         t = t[:, None, None]  # shape (B,1,1) for broadcast
 
@@ -469,7 +483,11 @@ class FlowmatchingActionHead(nn.Module):
         pred_actions = pred[:, -actions.shape[1] :]
 
         # Slice out only the action portion of pred and target.
-        action_loss = ((pred_actions - velocity) ** 2).mean()
+        action_error = (pred_actions - velocity) ** 2
+        if action_mask is None:
+            action_loss = action_error.mean()
+        else:
+            action_loss = (action_error * action_mask).sum() / action_mask.sum().clamp_min(1.0)
         if not self.use_tactile_dream:
             return action_loss
 
@@ -490,7 +508,10 @@ class FlowmatchingActionHead(nn.Module):
         losses = {
             "action_loss": action_loss,
             "tactile_loss": jepa_loss(
-                self.tactile_dream_head(tactile_trunk), tactile_target, beta=self.jepa_beta
+                self.tactile_dream_head(tactile_trunk),
+                tactile_target,
+                beta=self.jepa_beta,
+                mask=tactile_future_mask,
             ),
         }
 
@@ -502,7 +523,10 @@ class FlowmatchingActionHead(nn.Module):
             with torch.no_grad():
                 state_target = self.state_target_encoder(future_state)
             losses["state_jepa_loss"] = jepa_loss(
-                self.state_dream_head(tactile_trunk), state_target, beta=self.jepa_beta
+                self.state_dream_head(tactile_trunk),
+                state_target,
+                beta=self.jepa_beta,
+                mask=state_future_mask,
             )
 
         if self.dream_vision:
@@ -515,7 +539,10 @@ class FlowmatchingActionHead(nn.Module):
                 shape = None if future_vision_target is None else tuple(future_vision_target.shape)
                 raise ValueError(f"vision-JEPA requires [B, {expected[0]}, {expected[1]}], got {shape}")
             losses["vision_jepa_loss"] = jepa_loss(
-                self.vision_dream_head(tactile_trunk), future_vision_target, beta=self.jepa_beta
+                self.vision_dream_head(tactile_trunk),
+                future_vision_target,
+                beta=self.jepa_beta,
+                mask=vision_future_mask,
             )
         return losses
 

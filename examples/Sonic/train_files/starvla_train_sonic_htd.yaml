@@ -1,5 +1,5 @@
-# Table 1: UniVLaT/JEPA. HTD plus future state and future stereo objectives.
-run_id: sonic_jepa
+# Table 1: HTD. Current tactile conditions actions; future tactile is the only auxiliary target.
+run_id: sonic_htd
 run_root_dir: results/Checkpoints
 seed: 42
 wandb_entity: wang-zih23
@@ -38,8 +38,8 @@ framework:
     dream_horizon: 4
     vision_horizon: 4
     dream_hidden_dim: 1024
-    dream_state: true
-    dream_vision: true
+    dream_state: false
+    dream_vision: false
     vision_target_dim: 2048
     ema_decay: 0.999
     tactile_dream_beta: 1.0
@@ -72,8 +72,8 @@ datasets:
     delete_pause_frame: false
     tactile_mode: dream
     dream_horizon: 4
-    dream_state: true
-    dream_vision: true
+    dream_state: false
+    dream_vision: false
     vision_horizon: 4
 
 trainer:
