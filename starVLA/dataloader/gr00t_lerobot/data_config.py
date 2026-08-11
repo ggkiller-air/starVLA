@@ -1085,7 +1085,7 @@ class UnitreeG1SonicDataConfig:
 
     embodiment_tag = EmbodimentTag.UNITREE_G1_SONIC
     video_keys = ["video.ego_view_left", "video.ego_view_right"]
-    tactile_keys = ["tactile.tactile_raw"]
+    tactile_keys = ["tactile.vest", "tactile.left_arm", "tactile.right_arm"]
     state_keys = [
         "state.left_leg",
         "state.right_leg",

@@ -21,7 +21,7 @@ Action and auxiliary-target masks exclude repeated episode-tail padding from eve
 ## Environment
 
 ```bash
-cd /root/Projects/starVLA
+cd /home/wzh/Projects/Uni_VLaT/starVLA
 uv venv --python 3.10 .venv
 uv pip install --python .venv/bin/python -r requirements.txt
 uv pip install --python .venv/bin/python -e .
@@ -34,7 +34,7 @@ The fixed configs contain 20k steps, checkpoints at 10k and 20k, four workers pe
 and the measured throughput-optimal batch of 4 per GPU (global batch 16).
 
 ```bash
-cd /root/Projects/starVLA
+cd /home/wzh/Projects/Uni_VLaT/starVLA
 source .venv/bin/activate
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 
@@ -70,7 +70,7 @@ motion token into G1 whole-body control.
 Terminal 1, start the starVLA websocket backend (port 8000):
 
 ```bash
-cd /root/Projects/starVLA
+cd /home/wzh/Projects/Uni_VLaT/starVLA
 source .venv/bin/activate
 python -m deployment.model_server.server_sonic_policy \
   --ckpt-path results/Checkpoints/sonic_jepa/final_model/pytorch_model.pt \
@@ -80,7 +80,7 @@ python -m deployment.model_server.server_sonic_policy \
 Terminal 2, expose that backend through the Isaac-GR00T ZMQ PolicyServer (port 5550):
 
 ```bash
-cd /root/Projects/Isaac-GR00T
+cd /home/wzh/Projects/Uni_VLaT/Isaac-GR00T
 uv run --no-sync python gr00t/eval/run_sonic_bridge_server.py \
   --backend-host 127.0.0.1 --backend-port 8000 \
   --host 0.0.0.0 --port 5550
@@ -89,7 +89,7 @@ uv run --no-sync python gr00t/eval/run_sonic_bridge_server.py \
 Terminal 3, launch the shared controller and inference client:
 
 ```bash
-cd /root/Projects/GR00T-WholeBodyControl
+cd /home/wzh/Projects/Uni_VLaT/GR00T-WholeBodyControl
 python gear_sonic/scripts/launch_inference.py \
   --policy-host 127.0.0.1 --policy-port 5550 \
   --camera-host 192.168.123.164 \

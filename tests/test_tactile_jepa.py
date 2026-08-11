@@ -63,7 +63,7 @@ def _action_config(mode="notac", dream_state=False, dream_vision=False):
 
 
 def test_sonic_layout_and_single_normalization():
-    assert len(VALID_IDX) == sum(REGION_SIZES) == 112
+    assert len(VALID_IDX) == sum(REGION_SIZES) == 624
     assert len(set(VALID_IDX)) == len(VALID_IDX)
     assert min(VALID_IDX) >= 0 and max(VALID_IDX) < RAW_DIM
     assert tuple(rows * cols for rows, cols in REGION_GRIDS) == REGION_SIZES

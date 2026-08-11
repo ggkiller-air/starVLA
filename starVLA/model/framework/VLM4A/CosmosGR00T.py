@@ -86,7 +86,7 @@ class CosmosGR00TDefaultConfig:
             "tactile_cnn_channels": 32,
             "tactile_cnn_pool": [2, 2],
             "tactile_cnn_coord_scale": 0.1,
-            "tactile_raw_dim": 256,
+            "tactile_raw_dim": 768,
             "tactile_valid_idx": list(VALID_IDX),
             "tactile_region_rows": [rows for rows, _ in REGION_GRIDS],
             "tactile_region_cols": [cols for _, cols in REGION_GRIDS],

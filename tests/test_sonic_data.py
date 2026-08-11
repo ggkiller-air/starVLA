@@ -9,7 +9,7 @@ from omegaconf import OmegaConf
 from starVLA.dataloader.gr00t_lerobot.data_config import UnitreeG1SonicDataConfig
 from starVLA.dataloader.gr00t_lerobot.datasets import LeRobotSingleDataset
 
-DATASET_PATH = Path("/root/Projects/data/carry-bucket-stereo")
+DATASET_PATH = Path("/home/wzh/Projects/Uni_VLaT/data/desk_sweep")
 
 
 def _data_config(**overrides):
@@ -44,7 +44,7 @@ def test_sonic_modalities_follow_ablation_mode():
     assert dream["video"].delta_indices == list(range(5))
 
 
-@pytest.mark.skipif(not DATASET_PATH.exists(), reason="carry-bucket-stereo is not installed")
+@pytest.mark.skipif(not DATASET_PATH.exists(), reason="desk_sweep is not installed")
 @pytest.mark.parametrize(
     ("mode", "expected_keys", "tactile_shape"),
     [
@@ -52,7 +52,7 @@ def test_sonic_modalities_follow_ablation_mode():
         (
             "input",
             {"action", "action_mask", "image", "lang", "robot_tag", "state", "tactile"},
-            (1, 256),
+            (1, 768),
         ),
     ],
 )
@@ -74,7 +74,7 @@ def test_real_sonic_ablation_samples(mode, expected_keys, tactile_shape):
         assert sample["tactile"].shape == tactile_shape
 
 
-@pytest.mark.skipif(not DATASET_PATH.exists(), reason="carry-bucket-stereo is not installed")
+@pytest.mark.skipif(not DATASET_PATH.exists(), reason="desk_sweep is not installed")
 def test_real_sonic_sample_and_episode_tail_padding():
     data_config = UnitreeG1SonicDataConfig()
     cfg = _data_config()
@@ -90,7 +90,7 @@ def test_real_sonic_sample_and_episode_tail_padding():
     tail = dataset[int(dataset.trajectory_lengths[0]) - 1]
     assert first["action"].shape == (40, 78)
     assert first["state"].shape == (5, 46)
-    assert first["tactile"].shape == (5, 256)
+    assert first["tactile"].shape == (5, 768)
     assert first["tactile"].dtype == np.uint8
     assert first["action_mask"].all()
     assert first["tactile_future_mask"].all()

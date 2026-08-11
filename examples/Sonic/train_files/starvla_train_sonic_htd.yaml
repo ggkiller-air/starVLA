@@ -61,7 +61,7 @@ datasets:
   vla_data:
     dataset_py: lerobot_datasets
     data_root_dir: ../data
-    data_mix: carry_bucket_stereo
+    data_mix: desk_sweep
     lerobot_version: v2.0
     action_mode: abs
     include_state: true

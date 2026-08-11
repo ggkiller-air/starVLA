@@ -448,7 +448,10 @@ class FlowmatchingActionHead(nn.Module):
             elif tactile.ndim == 3:
                 tactile_current = tactile[:, 0]
             else:
-                raise ValueError(f"Expected tactile [B, 256] or [B, T, 256], got {tactile.shape}")
+                raise ValueError(
+                    f"Expected tactile [B, {self.tactile_encoder.raw_dim}] or "
+                    f"[B, T, {self.tactile_encoder.raw_dim}], got {tactile.shape}"
+                )
             tactile_features = self.tactile_encoder(tactile_current)
 
         # Maybe add position embedding.

@@ -17,14 +17,14 @@ def observation():
         "ego_view_left": np.zeros((8, 10, 3), dtype=np.uint8),
         "ego_view_right": np.zeros((8, 10, 3), dtype=np.uint8),
         "prompt": "carry the bucket",
-        "tactile": np.zeros(256, dtype=np.uint8),
+        "tactile": np.zeros(768, dtype=np.uint8),
     }
 
 
 def test_sonic_observation_contract_accepts_canonical_request():
     result = validate_observation(observation(), requires_tactile=True)
     assert result["state"].shape == (46,)
-    assert result["tactile"].shape == (256,)
+    assert result["tactile"].shape == (768,)
 
 
 def test_sonic_observation_contract_requires_tactile_for_jepa_checkpoint():
@@ -66,14 +66,14 @@ class FakeStarPolicy:
         return state + 1.0
 
     def predict_action(self, *, examples, unnorm_key):
-        assert unnorm_key == "carry_bucket"
+        assert unnorm_key == "desk_sweep"
         self.example = examples[0]
         return {"actions": np.zeros((1, 40, 78), dtype=np.float32)}
 
 
 def test_sonic_adapter_forwards_stereo_state_and_tactile_to_starvla():
     policy = FakeStarPolicy()
-    adapter = SonicPolicyAdapter(policy, unnorm_key="carry_bucket")
+    adapter = SonicPolicyAdapter(policy, unnorm_key="desk_sweep")
     obs = observation()
     obs["ego_view_left"].fill(1)
     obs["ego_view_right"].fill(2)

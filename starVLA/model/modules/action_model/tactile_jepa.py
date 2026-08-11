@@ -9,8 +9,8 @@ import torch.nn.functional as F
 from torch import nn
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
-RAW_DIM = 256
-REGION_GRIDS = ((6, 8), (5, 8), (2, 4), (1, 4), (2, 4), (1, 4))
+RAW_DIM = 768
+REGION_GRIDS = ((6, 8), (5, 8), (2, 4), (1, 4), (2, 4), (1, 4), (16, 16), (16, 16))
 REGION_SIZES = tuple(rows * cols for rows, cols in REGION_GRIDS)
 
 # Region-major, zero-based channel mapping from the Unitree G1 SONIC skin spec.
@@ -128,7 +128,9 @@ _VALID_IDX_ONE_BASED = (
     217,
     201,
 )
-VALID_IDX = tuple(index - 1 for index in _VALID_IDX_ONE_BASED)
+_VEST_VALID_IDX = tuple(index - 1 for index in _VALID_IDX_ONE_BASED)
+_ARM_ORDER = tuple(range(128, 256)) + tuple(range(128))
+VALID_IDX = _VEST_VALID_IDX + tuple(256 + i for i in _ARM_ORDER) + tuple(512 + i for i in _ARM_ORDER)
 
 
 class TwoLayerMLP(nn.Module):
