@@ -30,8 +30,10 @@ source .venv/bin/activate
 
 ## Full training
 
-The fixed configs contain 20k steps, checkpoints at 10k and 20k, four workers per rank,
-and the measured throughput-optimal batch of 4 per GPU (global batch 16).
+The fixed configs contain 200k steps, five 40k-step checkpoints, four workers per rank,
+and the measured throughput-optimal batch of 4 per GPU (global batch 16). This processes
+3.2M samples, matching the completed Isaac-GR00T run (`50,000 x 64`). The configs use the
+faster `decord` backend; a 120-step HTD run measured negligible prefetched data wait.
 
 ```bash
 cd /home/wzh/Projects/Uni_VLaT/starVLA

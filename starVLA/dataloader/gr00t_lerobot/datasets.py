@@ -62,7 +62,7 @@ LE_ROBOT_MODALITY_FILENAME = "meta/modality.json"
 LE_ROBOT_EPISODE_FILENAME = "meta/episodes.jsonl"
 LE_ROBOT_TASKS_FILENAME = "meta/tasks.jsonl"
 LE_ROBOT_INFO_FILENAME = "meta/info.json"
-LE_ROBOT_STATS_FILENAME = "meta/stats_gr00t.json"
+LE_ROBOT_STATS_FILENAME = "meta/stats_starvla_v2.json"
 LE_ROBOT_DATA_FILENAME = "data/*/*.parquet"
 LE_ROBOT_STEPS_FILENAME = "meta/steps.pkl"
 LE_ROBOT_STATS_FORMAT_VERSION = 2
@@ -179,6 +179,7 @@ def _load_stats_cache(
     expected_config: dict,
     *,
     invalidate_legacy: bool,
+    required_keys: set[str] | None = None,
 ) -> dict | None:
     if not stats_path.exists():
         return None
@@ -207,6 +208,11 @@ def _load_stats_cache(
     if cache_config != expected_config:
         if invalidate_legacy:
             _invalidate_legacy_stats_cache(stats_path, "statistics config mismatch, rebuilding cache")
+        return None
+
+    if required_keys is not None and not required_keys.issubset(statistics):
+        if invalidate_legacy:
+            _invalidate_legacy_stats_cache(stats_path, "statistics fields are incomplete")
         return None
 
     return statistics
@@ -291,11 +297,13 @@ def _load_or_compute_statistics(
     state_indices: list[int] | None,
     action_mode_apply_keys: list[str] | None,
     action_mode_state_map: dict[str, str] | None,
+    required_keys: set[str] | None = None,
 ) -> dict:
     le_statistics = _load_stats_cache(
         stats_path,
         stats_cache_config,
         invalidate_legacy=True,
+        required_keys=required_keys,
     )
     if le_statistics is not None:
         return le_statistics
@@ -827,6 +835,11 @@ class LeRobotSingleDataset(Dataset):
         normalized_state_map = _normalize_action_mode_state_map(
             self.data_cfg.get("action_mode_state_map", {}) if self.data_cfg else {}
         )
+        required_stat_keys = {
+            meta.original_key or subkey
+            for modality in (le_modality_meta.state, le_modality_meta.action)
+            for subkey, meta in modality.items()
+        }
         stats_cache_config = _build_stats_cache_config(
             action_mode=action_mode,
         )
@@ -849,6 +862,7 @@ class LeRobotSingleDataset(Dataset):
                 state_indices=state_indices,
                 action_mode_apply_keys=apply_keys,
                 action_mode_state_map=normalized_state_map,
+                required_keys=required_stat_keys,
             )
         else:
             le_statistics = None
@@ -861,6 +875,7 @@ class LeRobotSingleDataset(Dataset):
                 stats_path,
                 stats_cache_config,
                 invalidate_legacy=False,
+                required_keys=required_stat_keys,
             )
             if le_statistics is None:
                 raise RuntimeError(

@@ -68,7 +68,7 @@ datasets:
     per_device_batch_size: 4
     num_workers: 4
     obs_image_size: [224, 224]
-    video_backend: torchvision_av
+    video_backend: decord
     delete_pause_frame: false
     tactile_mode: dream
     dream_horizon: 4
@@ -77,9 +77,9 @@ datasets:
     vision_horizon: 4
 
 trainer:
-  max_train_steps: 20000
-  num_warmup_steps: 1000
-  save_interval: 10000
+  max_train_steps: 200000
+  num_warmup_steps: 10000
+  save_interval: 40000
   eval_interval: 1000
   save_format: pt
   learning_rate:
