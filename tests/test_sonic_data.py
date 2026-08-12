@@ -8,6 +8,7 @@ from omegaconf import OmegaConf
 
 from starVLA.dataloader.gr00t_lerobot.data_config import UnitreeG1SonicDataConfig
 from starVLA.dataloader.gr00t_lerobot.datasets import LeRobotSingleDataset
+from starVLA.dataloader.lerobot_datasets import get_vla_dataset
 
 DATASET_PATH = Path("/home/wzh/Projects/Uni_VLaT/data/desk_sweep")
 
@@ -42,6 +43,24 @@ def test_sonic_modalities_follow_ablation_mode():
     assert dream["tactile"].delta_indices == list(range(5))
     assert dream["state"].delta_indices == list(range(5))
     assert dream["video"].delta_indices == list(range(5))
+
+
+@pytest.mark.skipif(not DATASET_PATH.exists(), reason="desk_sweep is not installed")
+def test_train_val_split_has_no_episode_overlap():
+    cfg = _data_config(
+        data_root_dir=str(DATASET_PATH.parent),
+        data_mix="desk_sweep",
+        val_ratio=0.05,
+    )
+    train = get_vla_dataset(cfg, mode="train", seed=42)
+    val = get_vla_dataset(cfg, mode="val", seed=42)
+    train_ids = {trajectory_id for trajectory_id, _ in train.datasets[0].all_steps}
+    val_ids = {trajectory_id for trajectory_id, _ in val.datasets[0].all_steps}
+
+    assert train_ids
+    assert val_ids
+    assert train_ids.isdisjoint(val_ids)
+    assert train_ids | val_ids == set(train.datasets[0].trajectory_ids)
 
 
 @pytest.mark.skipif(not DATASET_PATH.exists(), reason="desk_sweep is not installed")

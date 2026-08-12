@@ -59,6 +59,7 @@ framework:
 
 datasets:
   vla_data:
+    val_ratio: 0.05
     dataset_py: lerobot_datasets
     data_root_dir: ../data
     data_mix: desk_sweep
@@ -81,6 +82,7 @@ trainer:
   num_warmup_steps: 6000
   save_interval: 30000
   eval_interval: 5000
+  val_batches: 8
   save_format: pt
   learning_rate:
     base: 1.0e-05

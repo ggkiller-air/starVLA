@@ -75,14 +75,19 @@ def setup_directories(cfg) -> Path:
     return output_dir
 
 
-def prepare_data(cfg, accelerator, output_dir) -> DataLoader:
+def prepare_data(cfg, accelerator, output_dir) -> tuple[DataLoader, DataLoader]:
     """Prepare VLA training data."""
     logger.info(f"Creating VLA Dataset with Mixture `{cfg.datasets.vla_data.data_mix}`")
-    vla_train_dataloader = build_dataloader(cfg=cfg, dataset_py=cfg.datasets.vla_data.dataset_py)
+    vla_train_dataloader = build_dataloader(
+        cfg=cfg, dataset_py=cfg.datasets.vla_data.dataset_py, mode="train"
+    )
+    vla_val_dataloader = build_dataloader(
+        cfg=cfg, dataset_py=cfg.datasets.vla_data.dataset_py, mode="val"
+    )
 
     accelerator.dataloader_config.dispatch_batches = False
     dist.barrier()
-    return vla_train_dataloader
+    return vla_train_dataloader, vla_val_dataloader
 
 
 def setup_optimizer_and_scheduler(model, cfg) -> Tuple[torch.optim.Optimizer, torch.optim.lr_scheduler._LRScheduler]:
@@ -115,10 +120,20 @@ def setup_optimizer_and_scheduler(model, cfg) -> Tuple[torch.optim.Optimizer, to
 
 
 class VLATrainer(TrainerUtils):
-    def __init__(self, cfg, model, vla_train_dataloader, optimizer, lr_scheduler, accelerator):
+    def __init__(
+        self,
+        cfg,
+        model,
+        vla_train_dataloader,
+        optimizer,
+        lr_scheduler,
+        accelerator,
+        vla_val_dataloader=None,
+    ):
         self.config = cfg
         self.model = model
         self.vla_train_dataloader = vla_train_dataloader
+        self.vla_val_dataloader = vla_val_dataloader or vla_train_dataloader
         self.optimizer = optimizer
         self.lr_scheduler = lr_scheduler
         self.accelerator = accelerator
@@ -152,11 +167,16 @@ class VLATrainer(TrainerUtils):
         self.model = self.freeze_backbones(self.model, freeze_modules=freeze_modules)
         self.print_trainable_parameters(self.model)
 
-        self.model, self.optimizer, self.vla_train_dataloader = self.setup_distributed_training(
-            self.accelerator,
+        (
             self.model,
             self.optimizer,
             self.vla_train_dataloader,
+            self.vla_val_dataloader,
+        ) = self.accelerator.prepare(
+            self.model,
+            self.optimizer,
+            self.vla_train_dataloader,
+            self.vla_val_dataloader,
         )
 
         self._init_wandb()
@@ -288,6 +308,28 @@ class VLATrainer(TrainerUtils):
 
         self.accelerator.wait_for_everyone()
 
+    def _save_best_model(self, val_action_mse: float):
+        state_dict = self.accelerator.get_state_dict(self.model)
+        if self.accelerator.is_main_process:
+            best_dir = Path(self.config.output_dir) / "best_model"
+            best_dir.mkdir(parents=True, exist_ok=True)
+            model_path = best_dir / "pytorch_model.pt"
+            temporary_model = best_dir / "pytorch_model.pt.tmp"
+            torch.save(state_dict, temporary_model)
+            os.replace(temporary_model, model_path)
+            temporary_metrics = best_dir / "metrics.json.tmp"
+            temporary_metrics.write_text(
+                json.dumps(
+                    {"step": self.completed_steps, "val_action_mse": val_action_mse},
+                    indent=2,
+                )
+                + "\n"
+            )
+            os.replace(temporary_metrics, best_dir / "metrics.json")
+            self._save_resolved_config(best_dir / "config.yaml")
+        del state_dict
+        self.accelerator.wait_for_everyone()
+
     def _log_metrics(self, metrics):
         """Record training metrics."""
         if self.completed_steps % self.config.trainer.logging_frequency == 0 and dist.get_rank() == 0:
@@ -302,6 +344,7 @@ class VLATrainer(TrainerUtils):
     def _create_data_iterators(self):
         """Create data iterators."""
         self.vla_iter = iter(self.vla_train_dataloader)
+        self.vla_val_iter = iter(self.vla_val_dataloader)
 
     def _get_next_batch(self):
         """Get next batch (automatically handle data loop)."""
@@ -365,22 +408,45 @@ class VLATrainer(TrainerUtils):
         self._finalize_training()
 
     def eval_action_model(self, step_metrics: dict = None) -> float:
-        """Run simple action-eval on current batch and attach score to metrics."""
-        examples = self._get_next_batch()
-        actions = [example["action"] for example in examples]
-        output_dict = self.accelerator.unwrap_model(self.model).predict_action(
-            examples=examples, use_ddim=True, num_ddim_steps=20
-        )
-
-        if self.accelerator.is_main_process:
-            normalized_actions = output_dict["normalized_actions"]
-            actions = np.array(actions)
-            num_pots = np.prod(actions.shape)
-            score = TrainerUtils.euclidean_distance(normalized_actions, actions)
-            step_metrics["mse_score"] = score / num_pots
-
-        del examples
-        dist.barrier()
+        """Evaluate deterministic held-out episodes and update the single best model."""
+        model = self.accelerator.unwrap_model(self.model)
+        was_training = model.training
+        model.eval()
+        squared_error = torch.zeros((), dtype=torch.float64, device=self.accelerator.device)
+        count = torch.zeros((), dtype=torch.float64, device=self.accelerator.device)
+        val_batches = int(self.config.trainer.get("val_batches", 8))
+        device_index = self.accelerator.device.index
+        fork_devices = [device_index] if device_index is not None else []
+        with torch.no_grad(), torch.random.fork_rng(devices=fork_devices):
+            torch.manual_seed(int(self.config.seed) + 10_000)
+            for _ in range(val_batches):
+                try:
+                    examples = next(self.vla_val_iter)
+                except StopIteration:
+                    self.vla_val_iter = iter(self.vla_val_dataloader)
+                    examples = next(self.vla_val_iter)
+                output = model.predict_action(examples=examples, use_ddim=True, num_ddim_steps=20)
+                prediction = torch.as_tensor(output["normalized_actions"], device=self.accelerator.device)
+                target = torch.as_tensor(np.asarray([item["action"] for item in examples]), device=prediction.device)
+                mask = torch.as_tensor(
+                    np.asarray([item.get("action_mask", np.ones_like(item["action"])) for item in examples]),
+                    device=prediction.device,
+                    dtype=torch.bool,
+                )
+                squared_error += ((prediction.double() - target.double()).square() * mask).sum()
+                count += mask.sum()
+        if dist.is_initialized():
+            dist.all_reduce(squared_error)
+            dist.all_reduce(count)
+        mse = (squared_error / count.clamp_min(1)).item()
+        step_metrics["val_action_mse"] = mse
+        metrics_path = Path(self.config.output_dir) / "best_model" / "metrics.json"
+        best_mse = float("inf")
+        if metrics_path.is_file():
+            best_mse = float(json.loads(metrics_path.read_text())["val_action_mse"])
+        if mse < best_mse:
+            self._save_best_model(mse)
+        model.train(was_training)
         return step_metrics
 
     def _log_training_config(self):
@@ -463,13 +529,16 @@ def main(cfg) -> None:
 
     output_dir = setup_directories(cfg=cfg)
     vla = build_framework(cfg)
-    vla_train_dataloader = prepare_data(cfg=cfg, accelerator=accelerator, output_dir=output_dir)
+    vla_train_dataloader, vla_val_dataloader = prepare_data(
+        cfg=cfg, accelerator=accelerator, output_dir=output_dir
+    )
     optimizer, lr_scheduler = setup_optimizer_and_scheduler(model=vla, cfg=cfg)
 
     trainer = VLATrainer(
         cfg=cfg,
         model=vla,
         vla_train_dataloader=vla_train_dataloader,
+        vla_val_dataloader=vla_val_dataloader,
         optimizer=optimizer,
         lr_scheduler=lr_scheduler,
         accelerator=accelerator,

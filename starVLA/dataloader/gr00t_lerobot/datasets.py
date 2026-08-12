@@ -2297,6 +2297,26 @@ class LeRobotMixtureDataset(Dataset):
         self.mode = mode
         self.data_cfg = kwargs["data_cfg"] if "data_cfg" in kwargs else None
 
+        val_ratio = float(self.data_cfg.get("val_ratio", 0.0)) if self.data_cfg else 0.0
+        if val_ratio >= 1.0:
+            raise ValueError("val_ratio must be smaller than 1")
+        for dataset_index, dataset in enumerate(self.datasets) if val_ratio > 0 else ():
+            trajectory_ids = np.asarray(dataset.trajectory_ids)
+            if len(trajectory_ids) < 2:
+                raise ValueError("best-model validation requires at least two trajectories")
+            shuffled = trajectory_ids.copy()
+            np.random.default_rng(seed + dataset_index).shuffle(shuffled)
+            val_count = min(len(shuffled) - 1, max(1, round(len(shuffled) * val_ratio)))
+            val_ids = set(shuffled[:val_count].tolist())
+            selected_ids = val_ids if mode == "val" else set(shuffled[val_count:].tolist())
+            dataset._all_steps = [
+                (trajectory_id, step)
+                for trajectory_id, step in dataset.all_steps
+                if trajectory_id in selected_ids
+            ]
+            if not dataset._all_steps:
+                raise ValueError(f"{mode} episode split is empty for {dataset.dataset_name}")
+
         # Set properties for sampling
 
         # 1. Dataset lengths
