@@ -30,10 +30,12 @@ source .venv/bin/activate
 
 ## Full training
 
-The fixed configs contain 200k steps, five 40k-step checkpoints, four workers per rank,
-and the measured throughput-optimal batch of 4 per GPU (global batch 16). This processes
-3.2M samples, matching the completed Isaac-GR00T run (`50,000 x 64`). The configs use the
-faster `decord` backend; a 120-step HTD run measured negligible prefetched data wait.
+The fixed configs contain 120k steps, four 30k-step checkpoints, four workers per rank,
+and the measured throughput-optimal batch of 4 per GPU (global batch 16). HTD takes about
+14-15 hours and processes 1.92M samples (about 21 dataset passes). This is a practical
+fine-tuning budget rather than a forced sample-count match. Resume only if validation or
+robot success is still improving. The configs use the faster `decord` backend; a 120-step
+HTD run measured negligible prefetched data wait.
 
 ```bash
 cd /home/wzh/Projects/Uni_VLaT/starVLA

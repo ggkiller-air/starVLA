@@ -77,10 +77,10 @@ datasets:
     vision_horizon: 4
 
 trainer:
-  max_train_steps: 200000
-  num_warmup_steps: 10000
-  save_interval: 40000
-  eval_interval: 1000
+  max_train_steps: 120000
+  num_warmup_steps: 6000
+  save_interval: 30000
+  eval_interval: 5000
   save_format: pt
   learning_rate:
     base: 1.0e-05
