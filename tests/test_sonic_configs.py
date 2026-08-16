@@ -44,6 +44,6 @@ def test_table1_configs_have_fixed_sonic_contract_and_matching_data(mode, expect
         assert modalities["state"].delta_indices == [0]
         assert modalities["video"].delta_indices == [0]
     else:
-        assert modalities["tactile"].delta_indices == list(range(5))
+        assert modalities["tactile"].delta_indices == list(range(-3, 5))
         assert modalities["state"].delta_indices == list(range(5))
         assert modalities["video"].delta_indices == list(range(5))

@@ -14,6 +14,7 @@ Conventions:
 import argparse
 import json
 import os
+import shutil
 import time
 from pathlib import Path
 from typing import Tuple
@@ -47,6 +48,41 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 # Initialize logger
 logger = get_logger(__name__)
+
+COMPARISON_GROUP = "sonic-htd-model-comparison"
+DEFAULT_CHECKPOINT_COUNT = 5
+
+
+def comparison_metrics(metrics, step, learning_rates):
+    """Return the common W&B schema used across all five VLA trainers."""
+    aliases = {
+        "comparison/step": step,
+        "comparison/loss": metrics.get("total_loss"),
+        "comparison/action_loss": metrics.get("action_dit_loss"),
+        "comparison/tactile_loss": metrics.get("tactile_loss"),
+        "comparison/vision_loss": metrics.get("vision_jepa_loss"),
+        "val/action_mse": metrics.get("val_action_mse"),
+    }
+    if learning_rates:
+        aliases["comparison/lr"] = learning_rates[-1]
+    return {key: value for key, value in aliases.items() if value is not None}
+
+
+def checkpoint_milestones(max_train_steps, checkpoint_count=DEFAULT_CHECKPOINT_COUNT):
+    """Return evenly spaced checkpoint steps, including the final step."""
+    max_train_steps = int(max_train_steps)
+    checkpoint_count = int(checkpoint_count)
+    if max_train_steps <= 0:
+        raise ValueError("max_train_steps must be positive")
+    if checkpoint_count <= 0:
+        raise ValueError("checkpoint_count must be positive")
+    if max_train_steps % checkpoint_count != 0:
+        raise ValueError(
+            f"max_train_steps ({max_train_steps}) must be divisible by "
+            f"checkpoint_count ({checkpoint_count})"
+        )
+    interval = max_train_steps // checkpoint_count
+    return tuple(interval * index for index in range(1, checkpoint_count + 1))
 
 
 def build_accelerator(cfg):
@@ -172,12 +208,21 @@ class VLATrainer(TrainerUtils):
             self.optimizer,
             self.vla_train_dataloader,
             self.vla_val_dataloader,
+            self.lr_scheduler,
         ) = self.accelerator.prepare(
             self.model,
             self.optimizer,
             self.vla_train_dataloader,
             self.vla_val_dataloader,
+            self.lr_scheduler,
         )
+
+        if self._resume_state_checkpoint is not None:
+            self._load_checkpoint(self._resume_state_checkpoint)
+
+        if self.completed_steps == 0 and self._resume_state_checkpoint is None:
+            logger.info("Saving step-0 smoke checkpoint before training")
+            self._save_checkpoint()
 
         self._init_wandb()
 
@@ -197,12 +242,14 @@ class VLATrainer(TrainerUtils):
             return
         if self.accelerator.is_main_process:
             wandb.init(
-                name=self.config.run_id,
+                name=f"StarVLA / {self.config.run_id}",
                 dir=os.path.join(self.config.output_dir, "wandb"),
                 project=self.config.wandb_project,
                 entity=self.config.wandb_entity,
-                group="vla-train",
+                group=COMPARISON_GROUP,
+                job_type="comparison-training",
             )
+            wandb.define_metric("comparison/*", step_metric="comparison/step")
 
     def _save_initial_configs(self):
         """Save full config and training script at the very start of training."""
@@ -225,6 +272,17 @@ class VLATrainer(TrainerUtils):
             self.config.save_accessed_config(output_dir / "config.yaml", use_original_values=False)
             logger.info(f"📊 Accessed config snapshot saved at {output_dir / 'config.yaml'}")
 
+    def _save_resolved_config(self, path):
+        """Atomically save the fully resolved config alongside a model."""
+        if not self.accelerator.is_main_process:
+            return
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        config = self.config.unwrap() if isinstance(self.config, AccessTrackedConfig) else self.config
+        temporary_path = path.with_suffix(path.suffix + ".tmp")
+        OmegaConf.save(config, temporary_path, resolve=True)
+        os.replace(temporary_path, path)
+
     def _init_checkpointing(self):
         """Initialize checkpoint directory and handle checkpoint loading."""
         self.checkpoint_dir = os.path.join(self.config.output_dir, "checkpoints")
@@ -234,15 +292,25 @@ class VLATrainer(TrainerUtils):
         is_resume = getattr(self.config.trainer, "is_resume", False)
         self.resume_from_checkpoint = pretrained_checkpoint
         self._sync_jepa_teachers_after_load = False
+        self._resume_state_checkpoint = None
 
         if is_resume:
             resume_from_checkpoint, self.completed_steps = self._get_latest_checkpoint(self.checkpoint_dir)
             if resume_from_checkpoint:
                 self.resume_from_checkpoint = resume_from_checkpoint
-                self.model = self.load_pretrained_backbones(self.model, self.resume_from_checkpoint, reload_modules=None)
-                self._sync_jepa_teachers_after_load = bool(
-                    getattr(self.model, "_jepa_teacher_keys_missing", False)
-                )
+                if os.path.isdir(resume_from_checkpoint):
+                    self._resume_state_checkpoint = resume_from_checkpoint
+                else:
+                    self.model = self.load_pretrained_backbones(
+                        self.model, self.resume_from_checkpoint, reload_modules=None
+                    )
+                    self._sync_jepa_teachers_after_load = bool(
+                        getattr(self.model, "_jepa_teacher_keys_missing", False)
+                    )
+                    logger.warning(
+                        "Legacy checkpoint contains model weights only; optimizer and RNG "
+                        "state cannot be restored exactly."
+                    )
                 logger.info(
                     f"Resuming training from checkpoint: {self.resume_from_checkpoint}, steps: {self.completed_steps}"
                 )
@@ -266,7 +334,7 @@ class VLATrainer(TrainerUtils):
 
     def _adjust_lr_scheduler_for_resume(self):
         """Adjust LR scheduler state after resuming from non-zero steps."""
-        if self.completed_steps > 0:
+        if self.completed_steps > 0 and self._resume_state_checkpoint is None:
             logger.info(f"Adjusting LR scheduler for resume from step {self.completed_steps}")
             for _ in range(self.completed_steps):
                 self.lr_scheduler.step()
@@ -280,31 +348,27 @@ class VLATrainer(TrainerUtils):
         self.accelerator.print(f"Resumed from checkpoint: {checkpoint_path}")
 
     def _save_checkpoint(self):
-        """Save current training state."""
+        """Save model, optimizer, scheduler, scaler, and RNG state on every rank."""
+        checkpoint_path = os.path.join(self.checkpoint_dir, f"steps_{self.completed_steps}")
+        self.accelerator.save_state(checkpoint_path)
+        self.accelerator.wait_for_everyone()
         if self.accelerator.is_main_process:
-            save_format = getattr(self.config.trainer, "save_format", "pt")
-            checkpoint_path = os.path.join(self.checkpoint_dir, f"steps_{self.completed_steps}")
-
-            state_dict = self.accelerator.get_state_dict(self.model)
-            if save_format == "safetensors":
-                from safetensors.torch import save_file
-
-                save_file(state_dict, checkpoint_path + "_model.safetensors")
-            elif save_format == "pt":
-                torch.save(state_dict, checkpoint_path + "_pytorch_model.pt")
-            else:
-                raise ValueError(f"Unsupported save_format `{save_format}`. Expected `pt` or `safetensors`.")
-
             summary_data = {"steps": self.completed_steps}
             with open(os.path.join(self.config.output_dir, "summary.jsonl"), "a") as f:
                 f.write(json.dumps(summary_data) + "\n")
-            self.accelerator.print(f"✅ Checkpoint saved at {checkpoint_path}")
+            self.accelerator.print(f"Checkpoint saved at {checkpoint_path}")
+            self._save_resolved_config(Path(checkpoint_path) / "config.yaml")
 
             if isinstance(self.config, AccessTrackedConfig):
                 logger.info("📊 Saving accessed configuration...")
                 output_dir = Path(self.config.output_dir)
                 self.config.save_accessed_config(output_dir / "config.yaml", use_original_values=False)
                 logger.info("✅ Configuration files saved")
+            if self.completed_steps > 0:
+                smoke_checkpoint = Path(self.checkpoint_dir) / "steps_0"
+                if smoke_checkpoint.is_dir():
+                    shutil.rmtree(smoke_checkpoint)
+                    logger.info("Removed step-0 smoke checkpoint after first periodic save")
 
         self.accelerator.wait_for_everyone()
 
@@ -338,6 +402,7 @@ class VLATrainer(TrainerUtils):
                 group_name = group.get("name", str(i))
                 metrics[f"learning_rate/{group_name}"] = last_lrs[i] if i < len(last_lrs) else last_lrs[-1]
             metrics["epoch"] = round(self.completed_steps / len(self.vla_train_dataloader), 2)
+            metrics.update(comparison_metrics(metrics, self.completed_steps, last_lrs))
             wandb.log(metrics, step=self.completed_steps)
             logger.info(f"Step {self.completed_steps}, Loss: {metrics})")
 
@@ -362,6 +427,10 @@ class VLATrainer(TrainerUtils):
 
     def train(self):
         """Execute training loop."""
+        self.checkpoint_steps = checkpoint_milestones(
+            self.config.trainer.max_train_steps,
+            self.config.trainer.get("checkpoint_count", DEFAULT_CHECKPOINT_COUNT),
+        )
         self._log_training_config()
         self._create_data_iterators()
         progress_bar = tqdm(
@@ -399,7 +468,7 @@ class VLATrainer(TrainerUtils):
             step_metrics["timing/model"] = t_end_model - t_start_model
             self._log_metrics(step_metrics)
 
-            if self.completed_steps % self.config.trainer.save_interval == 0 and self.completed_steps > 0:
+            if self.completed_steps in self.checkpoint_steps:
                 self._save_checkpoint()
 
             if self.completed_steps >= self.config.trainer.max_train_steps:
@@ -454,6 +523,7 @@ class VLATrainer(TrainerUtils):
         if self.accelerator.is_main_process:
             logger.info("***** Training Configuration *****")
             logger.info(f"  Total optimization steps = {self.config.trainer.max_train_steps}")
+            logger.info(f"  Checkpoint milestones = {self.checkpoint_steps}")
             logger.info(f"  Per device batch size = {self.config.datasets.vla_data.per_device_batch_size}")
             logger.info(f"  Gradient accumulation steps = {self.accelerator.gradient_accumulation_steps}")
             logger.info(f"  Total batch size = {self.total_batch_size}")

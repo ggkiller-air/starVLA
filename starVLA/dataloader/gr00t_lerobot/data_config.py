@@ -1127,6 +1127,11 @@ class UnitreeG1SonicDataConfig:
         if tactile_mode not in {"notac", "input", "dream"}:
             raise ValueError(f"Unknown tactile_mode {tactile_mode!r}")
         dream_horizon = int(data_cfg.get("dream_horizon", 4))
+        tactile_history_length = (
+            int(data_cfg.get("tactile_history_length", 4))
+            if bool(data_cfg.get("use_tactile_temporal", False))
+            else 1
+        )
         vision_horizon = int(data_cfg.get("vision_horizon", dream_horizon))
         dream_state = tactile_mode == "dream" and bool(data_cfg.get("dream_state", False))
         dream_vision = tactile_mode == "dream" and bool(data_cfg.get("dream_vision", False))
@@ -1148,7 +1153,11 @@ class UnitreeG1SonicDataConfig:
         }
         if tactile_mode != "notac":
             configs["tactile"] = ModalityConfig(
-                delta_indices=list(range(dream_horizon + 1)) if tactile_mode == "dream" else [0],
+                delta_indices=(
+                    list(range(1 - tactile_history_length, dream_horizon + 1))
+                    if tactile_mode == "dream"
+                    else list(range(1 - tactile_history_length, 1))
+                ),
                 modality_keys=self.tactile_keys,
             )
         return configs

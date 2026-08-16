@@ -288,6 +288,37 @@ class TactileEncoder(nn.Module):
         return pooled if has_time else pooled[:, 0]
 
 
+class TactileTemporalEncoder(nn.Module):
+    def __init__(self, embed_dim: int, history_length: int, num_heads: int = 8):
+        super().__init__()
+        if history_length < 2:
+            raise ValueError("tactile history must contain at least two frames")
+        self.history_length = history_length
+        self.time_embedding = nn.Parameter(torch.empty(history_length, embed_dim))
+        layer = nn.TransformerEncoderLayer(
+            d_model=embed_dim,
+            nhead=num_heads,
+            dim_feedforward=2 * embed_dim,
+            dropout=0.0,
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
+        )
+        self.transformer = nn.TransformerEncoder(layer, num_layers=1)
+        self.output_norm = nn.LayerNorm(embed_dim)
+        nn.init.normal_(self.time_embedding, mean=0.0, std=0.02)
+
+    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
+        if tokens.ndim != 4 or tokens.shape[1] != self.history_length:
+            raise ValueError(
+                f"Expected tactile tokens [B,{self.history_length},N,D], got {tuple(tokens.shape)}"
+            )
+        batch, history, slots, width = tokens.shape
+        sequence = tokens.permute(0, 2, 1, 3).reshape(batch * slots, history, width)
+        sequence = self.transformer(sequence + self.time_embedding[None].to(sequence.dtype))
+        return self.output_norm(sequence[:, -1]).reshape(batch, slots, width)
+
+
 class DreamHead(nn.Module):
     def __init__(self, input_dim: int, target_dim: int, horizon: int, hidden_dim: int):
         super().__init__()
@@ -309,6 +340,7 @@ def jepa_loss(
     prediction = prediction.float()
     target = target.detach().float()
     direction = 1.0 - F.cosine_similarity(prediction, target, dim=-1)
+    direction = direction * (target.norm(dim=-1) > 1e-6).to(direction.dtype)
     magnitude = F.smooth_l1_loss(prediction.norm(dim=-1), target.norm(dim=-1), reduction="none")
     loss = direction + beta * magnitude
     if mask is None:
@@ -317,6 +349,16 @@ def jepa_loss(
     if mask.shape != loss.shape:
         raise ValueError(f"JEPA mask shape {tuple(mask.shape)} does not match loss {tuple(loss.shape)}")
     return (loss * mask).sum() / mask.sum().clamp_min(1.0)
+
+
+def latent_prediction_target(
+    future: torch.Tensor, current: torch.Tensor, use_delta: bool
+) -> torch.Tensor:
+    if not use_delta:
+        return future
+    if current.ndim == future.ndim - 1:
+        current = current.unsqueeze(1)
+    return future - current
 
 
 def build_ema_teacher(student: nn.Module) -> nn.Module:

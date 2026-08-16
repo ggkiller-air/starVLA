@@ -1,12 +1,24 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
+from pathlib import Path
 from types import SimpleNamespace
 
 import torch
 from torch import nn
+from omegaconf import OmegaConf
 
 from starVLA.training import train_starvla
+
+
+def test_checkpoint_milestones_are_five_even_twenty_percent_saves():
+    assert train_starvla.checkpoint_milestones(45_000) == (
+        9_000,
+        18_000,
+        27_000,
+        36_000,
+        45_000,
+    )
 
 
 def test_build_accelerator_wires_yaml_gradient_accumulation(monkeypatch):
@@ -121,3 +133,96 @@ def test_train_step_accumulates_weighted_loss_and_updates_teacher_once():
     assert model.teacher_updates == 1
     assert scheduler.steps == 1
     assert model.weight.grad is None
+
+
+def test_save_resolved_config_writes_best_model_config_atomically(tmp_path):
+    accelerator = SimpleNamespace(
+        is_main_process=True, num_processes=1, gradient_accumulation_steps=1
+    )
+    trainer = train_starvla.VLATrainer(
+        OmegaConf.create(
+            {"value": 7, "datasets": {"vla_data": {"per_device_batch_size": 1}}}
+        ),
+        None,
+        [],
+        None,
+        None,
+        accelerator,
+    )
+    config_path = tmp_path / "best_model" / "config.yaml"
+
+    trainer._save_resolved_config(config_path)
+
+    assert OmegaConf.load(config_path).value == 7
+    assert not config_path.with_suffix(".yaml.tmp").exists()
+
+
+def test_comparison_metrics_uses_action_learning_rate_and_omits_missing_vision():
+    metrics = train_starvla.comparison_metrics(
+        {
+            "total_loss": 1.5,
+            "action_dit_loss": 1.0,
+            "tactile_loss": 0.5,
+            "val_action_mse": 0.25,
+        },
+        step=12,
+        learning_rates=[1e-5, 1e-4],
+    )
+
+    assert metrics == {
+        "comparison/step": 12,
+        "comparison/loss": 1.5,
+        "comparison/action_loss": 1.0,
+        "comparison/tactile_loss": 0.5,
+        "val/action_mse": 0.25,
+        "comparison/lr": 1e-4,
+    }
+
+
+class _CheckpointAccelerator:
+    num_processes = 1
+    gradient_accumulation_steps = 1
+    is_main_process = True
+
+    def __init__(self):
+        self.saved = []
+
+    def save_state(self, path):
+        path = Path(path)
+        path.mkdir(parents=True)
+        (path / "optimizer.bin").write_bytes(b"state")
+        self.saved.append(path)
+
+    @staticmethod
+    def wait_for_everyone():
+        return None
+
+    @staticmethod
+    def print(_message):
+        return None
+
+
+def test_checkpoint_saves_full_state_and_prefers_it_over_legacy(tmp_path):
+    accelerator = _CheckpointAccelerator()
+    config = OmegaConf.create(
+        {
+            "output_dir": str(tmp_path),
+            "datasets": {"vla_data": {"per_device_batch_size": 1}},
+            "trainer": {},
+        }
+    )
+    trainer = train_starvla.VLATrainer(config, None, [], None, None, accelerator)
+    trainer.checkpoint_dir = str(tmp_path / "checkpoints")
+    Path(trainer.checkpoint_dir).mkdir()
+    trainer.completed_steps = 5
+    (Path(trainer.checkpoint_dir) / "steps_5_pytorch_model.pt").write_bytes(b"legacy")
+
+    trainer._save_checkpoint()
+
+    checkpoint = Path(trainer.checkpoint_dir) / "steps_5"
+    assert accelerator.saved == [checkpoint]
+    assert (checkpoint / "optimizer.bin").is_file()
+    assert (checkpoint / "config.yaml").is_file()
+    latest, step = trainer._get_latest_checkpoint(trainer.checkpoint_dir)
+    assert Path(latest) == checkpoint
+    assert step == 5

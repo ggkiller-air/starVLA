@@ -11,6 +11,7 @@ import torch
 class GR00TJEPAFrameworkMixin:
     _JEPA_CHECKPOINT_PREFIXES = (
         "action_model.tactile_encoder.",
+        "action_model.tactile_temporal_encoder.",
         "action_model.tactile_target_encoder.",
         "action_model.tactile_dream_head.",
         "action_model.state_target_encoder.",
@@ -67,6 +68,9 @@ class GR00TJEPAFrameworkMixin:
             "dream_state": self.action_model.dream_state,
             "dream_vision": self.action_model.dream_vision,
             "vision_horizon": self.action_model.vision_horizon,
+            "use_tactile_temporal": self.action_model.use_tactile_temporal,
+            "tactile_history_length": self.action_model.tactile_history_length,
+            "use_delta_targets": self.action_model.use_delta_targets,
         }
         for key, model_value in expected.items():
             data_value = data_config.get(key, model_value)
@@ -80,8 +84,13 @@ class GR00TJEPAFrameworkMixin:
                 raise ValueError(f"Dataset/model JEPA config mismatch for {key}: {data_value!r} != {model_value!r}")
 
     @torch.no_grad()
-    def _encode_future_vision_targets(self, examples: list[dict[str, Any]], dtype: torch.dtype) -> torch.Tensor:
-        expected_horizon = self.action_model.vision_horizon
+    def _encode_future_vision_targets(
+        self,
+        examples: list[dict[str, Any]],
+        dtype: torch.dtype,
+        expected_horizon: int | None = None,
+    ) -> torch.Tensor:
+        expected_horizon = expected_horizon or self.action_model.vision_horizon
         windows = []
         num_views = None
         for example in examples:
@@ -178,8 +187,15 @@ class GR00TJEPAFrameworkMixin:
         )
 
         future_vision = None
+        current_vision = None
         if self.action_model.dream_vision:
             future_vision = self._encode_future_vision_targets(examples, dtype=dtype)
+            if self.action_model.use_delta_targets:
+                current_vision = self._encode_future_vision_targets(
+                    [{"future_images": [example["image"]]} for example in examples],
+                    dtype=dtype,
+                    expected_horizon=1,
+                )[:, 0]
 
         def repeat(value):
             return None if value is None else value.repeat(repeats, *([1] * (value.ndim - 1)))
@@ -194,6 +210,7 @@ class GR00TJEPAFrameworkMixin:
             tactile=repeat(tactile),
             future_state=repeat(future_state),
             future_vision_target=repeat(future_vision),
+            current_vision_target=repeat(current_vision),
             action_mask=repeat(action_mask),
             tactile_future_mask=repeat(tactile_future_mask),
             state_future_mask=repeat(state_future_mask),

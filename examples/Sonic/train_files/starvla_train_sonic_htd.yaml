@@ -2,8 +2,8 @@
 run_id: sonic_htd
 run_root_dir: results/Checkpoints
 seed: 42
-wandb_entity: wang-zih23
-wandb_project: starvla-tactile-jepa
+wandb_entity: null
+wandb_project: univlat
 is_debug: false
 version_id: "0.21"
 
@@ -78,9 +78,9 @@ datasets:
     vision_horizon: 4
 
 trainer:
-  max_train_steps: 120000
-  num_warmup_steps: 6000
-  save_interval: 30000
+  max_train_steps: 45000
+  num_warmup_steps: 2250
+  checkpoint_count: 5
   eval_interval: 5000
   val_batches: 8
   save_format: pt

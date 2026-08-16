@@ -11,6 +11,7 @@ from starVLA.model.modules.action_model.tactile_jepa import (
     REGION_SIZES,
     VALID_IDX,
     TactileEncoder,
+    TactileTemporalEncoder,
     build_ema_teacher,
     ema_update,
     jepa_loss,
@@ -44,6 +45,9 @@ def _action_config(mode="notac", dream_state=False, dream_vision=False):
                     "dream_hidden_dim": 32,
                     "dream_state": dream_state,
                     "dream_vision": dream_vision,
+                    "use_tactile_temporal": mode == "dream" and dream_state,
+                    "tactile_history_length": 4,
+                    "use_delta_targets": mode == "dream" and dream_state,
                     "vision_target_dim": 64,
                     "ema_decay": 0.9,
                     "diffusion_model_cfg": {
@@ -102,6 +106,13 @@ def test_ema_teacher_is_frozen_and_moves_toward_student():
     assert torch.allclose(after, 0.5 * before + 0.5 * next(student.parameters()))
 
 
+def test_temporal_encoder_shape_and_zero_delta_loss():
+    encoder = TactileTemporalEncoder(16, 4, num_heads=4)
+    assert encoder(torch.randn(2, 4, 3, 16)).shape == (2, 3, 16)
+    zero = torch.zeros(2, 4, 16)
+    assert jepa_loss(zero, zero) == 0
+
+
 def test_notac_keeps_baseline_graph_and_scalar_loss():
     model = FlowmatchingActionHead(_action_config())
     assert not hasattr(model, "tactile_encoder")
@@ -128,9 +139,10 @@ def test_dream_mode_returns_all_losses_and_never_grads_teachers():
         torch.randn(2, 7, 64),
         torch.randn(2, 4, 6),
         torch.randn(2, 1, 5),
-        tactile=torch.randint(0, 256, (2, 3, RAW_DIM), dtype=torch.uint8),
+        tactile=torch.randint(0, 256, (2, 6, RAW_DIM), dtype=torch.uint8),
         future_state=torch.randn(2, 2, 5),
         future_vision_target=torch.randn(2, 2, 64),
+        current_vision_target=torch.randn(2, 64),
     )
     assert set(output) == {"action_loss", "tactile_loss", "state_jepa_loss", "vision_jepa_loss"}
     assert all(torch.isfinite(loss) for loss in output.values())
@@ -193,7 +205,7 @@ def test_future_targets_do_not_condition_action_prediction():
     vl_embs = torch.randn(2, 7, 64)
     actions = torch.randn(2, 4, 6)
     current_state = torch.randn(2, 1, 5)
-    current_tactile = torch.randint(0, 256, (2, 1, RAW_DIM), dtype=torch.uint8)
+    current_tactile = torch.randint(0, 256, (2, 4, RAW_DIM), dtype=torch.uint8)
 
     def forward_with_future(fill):
         tactile = torch.cat(
@@ -207,6 +219,7 @@ def test_future_targets_do_not_condition_action_prediction():
             tactile=tactile,
             future_state=torch.full((2, 2, 5), float(fill)),
             future_vision_target=torch.full((2, 2, 64), float(fill)),
+            current_vision_target=torch.zeros(2, 64),
         )
 
     first = forward_with_future(0)
@@ -221,7 +234,7 @@ def test_dream_mode_fails_fast_without_future_targets():
             torch.randn(1, 7, 64),
             torch.randn(1, 4, 6),
             torch.randn(1, 1, 5),
-            tactile=torch.randint(0, 256, (1, 3, RAW_DIM), dtype=torch.uint8),
+            tactile=torch.randint(0, 256, (1, 6, RAW_DIM), dtype=torch.uint8),
         )
 
 

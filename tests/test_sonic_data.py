@@ -23,6 +23,9 @@ def _data_config(**overrides):
         "dream_state": True,
         "dream_vision": True,
         "vision_horizon": 4,
+        "use_tactile_temporal": True,
+        "tactile_history_length": 4,
+        "use_delta_targets": True,
         "video_backend": "torchvision_av",
     }
     values.update(overrides)
@@ -36,11 +39,13 @@ def test_sonic_modalities_follow_ablation_mode():
     assert notac["state"].delta_indices == [0]
     assert notac["video"].delta_indices == [0]
 
-    input_only = config.modality_config_for(_data_config(tactile_mode="input"))
+    input_only = config.modality_config_for(
+        _data_config(tactile_mode="input", use_tactile_temporal=False)
+    )
     assert input_only["tactile"].delta_indices == [0]
 
     dream = config.modality_config_for(_data_config())
-    assert dream["tactile"].delta_indices == list(range(5))
+    assert dream["tactile"].delta_indices == list(range(-3, 5))
     assert dream["state"].delta_indices == list(range(5))
     assert dream["video"].delta_indices == list(range(5))
 
@@ -77,7 +82,10 @@ def test_train_val_split_has_no_episode_overlap():
 )
 def test_real_sonic_ablation_samples(mode, expected_keys, tactile_shape):
     data_config = UnitreeG1SonicDataConfig()
-    cfg = _data_config(tactile_mode=mode)
+    cfg = _data_config(
+        tactile_mode=mode,
+        use_tactile_temporal=mode == "dream",
+    )
     dataset = LeRobotSingleDataset(
         dataset_path=DATASET_PATH,
         modality_configs=data_config.modality_config_for(cfg),
@@ -109,7 +117,7 @@ def test_real_sonic_sample_and_episode_tail_padding():
     tail = dataset[int(dataset.trajectory_lengths[0]) - 1]
     assert first["action"].shape == (40, 78)
     assert first["state"].shape == (5, 46)
-    assert first["tactile"].shape == (5, 768)
+    assert first["tactile"].shape == (8, 768)
     assert first["tactile"].dtype == np.uint8
     assert first["action_mask"].all()
     assert first["tactile_future_mask"].all()
@@ -118,7 +126,9 @@ def test_real_sonic_sample_and_episode_tail_padding():
     assert len(first["image"]) == 2
     assert len(first["future_images"]) == 4
     assert all(len(frame) == 2 for frame in first["future_images"])
-    assert all(np.array_equal(tail["tactile"][0], value) for value in tail["tactile"][1:])
+    assert all(
+        np.array_equal(tail["tactile"][3], value) for value in tail["tactile"][4:]
+    )
     assert all(np.array_equal(tail["state"][0], value) for value in tail["state"][1:])
     current_images = [np.asarray(image) for image in tail["image"]]
     for frame in tail["future_images"]:

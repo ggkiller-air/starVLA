@@ -1463,7 +1463,13 @@ class LeRobotSingleDataset(Dataset):
             sample["tactile"] = tactile.astype(np.uint8, copy=False)
             tactile_time_mask = _time_mask("tactile")
             if tactile_time_mask is not None and tactile_time_mask.size > 1:
-                sample["tactile_future_mask"] = tactile_time_mask[1:]
+                tactile_history_length = (
+                    int(self.data_cfg.get("tactile_history_length", 4))
+                    if self.data_cfg is not None
+                    and bool(self.data_cfg.get("use_tactile_temporal", False))
+                    else 1
+                )
+                sample["tactile_future_mask"] = tactile_time_mask[tactile_history_length:]
 
         if self.data_cfg is not None and self.data_cfg.get("include_state", False) not in ["False", False]:
             state = []

@@ -2,8 +2,8 @@
 run_id: sonic_jepa
 run_root_dir: results/Checkpoints
 seed: 42
-wandb_entity: wang-zih23
-wandb_project: starvla-tactile-jepa
+wandb_entity: null
+wandb_project: univlat
 is_debug: false
 version_id: "0.21"
 
@@ -40,6 +40,10 @@ framework:
     dream_hidden_dim: 1024
     dream_state: true
     dream_vision: true
+    use_tactile_temporal: true
+    tactile_history_length: 4
+    tactile_temporal_heads: 8
+    use_delta_targets: true
     vision_target_dim: 2048
     ema_decay: 0.999
     tactile_dream_beta: 1.0
@@ -75,12 +79,15 @@ datasets:
     dream_horizon: 4
     dream_state: true
     dream_vision: true
+    use_tactile_temporal: true
+    tactile_history_length: 4
+    use_delta_targets: true
     vision_horizon: 4
 
 trainer:
   max_train_steps: 120000
   num_warmup_steps: 6000
-  save_interval: 30000
+  checkpoint_count: 5
   eval_interval: 5000
   val_batches: 8
   save_format: pt

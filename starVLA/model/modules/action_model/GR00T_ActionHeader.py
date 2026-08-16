@@ -24,9 +24,11 @@ from starVLA.model.modules.action_model.tactile_jepa import (
     VALID_IDX,
     DreamHead,
     TactileEncoder,
+    TactileTemporalEncoder,
     build_ema_teacher,
     ema_update,
     jepa_loss,
+    latent_prediction_target,
 )
 
 # TODO try to meger DiT Modules with follow_match_head, they are just the same arch, but diff loss, use diffusers package will be simple
@@ -320,6 +322,11 @@ class FlowmatchingActionHead(nn.Module):
         self.dream_state = self.use_tactile_dream and bool(config.get("dream_state", False))
         self.dream_vision = self.use_tactile_dream and bool(config.get("dream_vision", False))
         self.dream_horizon = int(config.get("dream_horizon", 4))
+        self.use_tactile_temporal = bool(config.get("use_tactile_temporal", False))
+        self.tactile_history_length = (
+            int(config.get("tactile_history_length", 4)) if self.use_tactile_temporal else 1
+        )
+        self.use_delta_targets = bool(config.get("use_delta_targets", False))
         self.vision_horizon = int(config.get("vision_horizon", self.dream_horizon))
         self.ema_decay = float(config.get("ema_decay", 0.999))
         self.jepa_beta = float(config.get("tactile_dream_beta", 1.0))
@@ -353,6 +360,12 @@ class FlowmatchingActionHead(nn.Module):
                 valid_idx=tuple(config.get("tactile_valid_idx", VALID_IDX)),
                 region_grids=tuple(zip(region_rows, region_cols, strict=True)),
             )
+            if self.use_tactile_temporal:
+                self.tactile_temporal_encoder = TactileTemporalEncoder(
+                    self.input_embedding_dim,
+                    self.tactile_history_length,
+                    int(config.get("tactile_temporal_heads", 8)),
+                )
 
         if self.use_tactile_dream:
             dream_hidden_dim = int(config.get("dream_hidden_dim", self.hidden_size))
@@ -400,6 +413,7 @@ class FlowmatchingActionHead(nn.Module):
         tactile: torch.Tensor = None,
         future_state: torch.Tensor = None,
         future_vision_target: torch.Tensor = None,
+        current_vision_target: torch.Tensor = None,
         action_mask: torch.Tensor = None,
         tactile_future_mask: torch.Tensor = None,
         state_future_mask: torch.Tensor = None,
@@ -444,15 +458,27 @@ class FlowmatchingActionHead(nn.Module):
             if tactile is None:
                 raise ValueError("tactile fusion training requires a current tactile frame")
             if tactile.ndim == 2:
-                tactile_current = tactile
+                tactile_history = tactile.unsqueeze(1)
             elif tactile.ndim == 3:
-                tactile_current = tactile[:, 0]
+                tactile_history = tactile[:, : self.tactile_history_length]
             else:
                 raise ValueError(
                     f"Expected tactile [B, {self.tactile_encoder.raw_dim}] or "
                     f"[B, T, {self.tactile_encoder.raw_dim}], got {tactile.shape}"
                 )
-            tactile_features = self.tactile_encoder(tactile_current)
+            if tactile_history.shape[1] < self.tactile_history_length:
+                padding = tactile_history[:, :1].expand(
+                    -1, self.tactile_history_length - tactile_history.shape[1], -1
+                )
+                tactile_history = torch.cat((padding, tactile_history), dim=1)
+            if self.use_tactile_temporal:
+                batch, steps, width = tactile_history.shape
+                tactile_tokens = self.tactile_encoder(
+                    tactile_history.reshape(batch * steps, width)
+                ).reshape(batch, steps, self.tactile_encoder.num_tokens, -1)
+                tactile_features = self.tactile_temporal_encoder(tactile_tokens)
+            else:
+                tactile_features = self.tactile_encoder(tactile_history[:, -1])
 
         # Maybe add position embedding.
         if self.config.add_pos_embed:
@@ -494,7 +520,10 @@ class FlowmatchingActionHead(nn.Module):
         if not self.use_tactile_dream:
             return action_loss
 
-        expected_tactile_shape = (self.dream_horizon + 1, self.tactile_encoder.raw_dim)
+        expected_tactile_shape = (
+            self.tactile_history_length + self.dream_horizon,
+            self.tactile_encoder.raw_dim,
+        )
         if tactile.ndim != 3 or tactile.shape[1:] != expected_tactile_shape:
             raise ValueError(
                 "tactile dream requires "
@@ -504,9 +533,16 @@ class FlowmatchingActionHead(nn.Module):
         if tactile_slice is None:
             raise RuntimeError("Tactile token slice was not constructed")
         tactile_trunk = model_output[:, tactile_slice].mean(dim=1)
+        current_index = self.tactile_history_length - 1
         with torch.no_grad():
             tactile_target = self.tactile_target_encoder.encode_pooled(
-                tactile[:, 1 : 1 + self.dream_horizon]
+                tactile[:, current_index + 1 : current_index + 1 + self.dream_horizon]
+            )
+            current_tactile = self.tactile_target_encoder.encode_pooled(
+                tactile[:, current_index]
+            )
+            tactile_target = latent_prediction_target(
+                tactile_target, current_tactile, self.use_delta_targets
             )
         losses = {
             "action_loss": action_loss,
@@ -525,6 +561,10 @@ class FlowmatchingActionHead(nn.Module):
                 raise ValueError(f"state-JEPA requires [B, {expected}, D], got {shape}")
             with torch.no_grad():
                 state_target = self.state_target_encoder(future_state)
+                current_state = self.state_target_encoder(state[:, :1])[:, 0]
+                state_target = latent_prediction_target(
+                    state_target, current_state, self.use_delta_targets
+                )
             losses["state_jepa_loss"] = jepa_loss(
                 self.state_dream_head(tactile_trunk),
                 state_target,
@@ -541,9 +581,13 @@ class FlowmatchingActionHead(nn.Module):
             ):
                 shape = None if future_vision_target is None else tuple(future_vision_target.shape)
                 raise ValueError(f"vision-JEPA requires [B, {expected[0]}, {expected[1]}], got {shape}")
+            if self.use_delta_targets and current_vision_target is None:
+                raise ValueError("delta vision-JEPA requires a current vision target")
             losses["vision_jepa_loss"] = jepa_loss(
                 self.vision_dream_head(tactile_trunk),
-                future_vision_target,
+                latent_prediction_target(
+                    future_vision_target, current_vision_target, self.use_delta_targets
+                ),
                 beta=self.jepa_beta,
                 mask=vision_future_mask,
             )
@@ -578,9 +622,27 @@ class FlowmatchingActionHead(nn.Module):
                 tactile = torch.zeros(
                     batch_size, self.tactile_encoder.raw_dim, dtype=vl_embs.dtype, device=device
                 )
-            elif tactile.ndim == 3:
-                tactile = tactile[:, 0]
-            tactile_features = self.tactile_encoder(tactile)
+            if tactile.ndim == 2:
+                tactile = tactile.unsqueeze(1)
+            history = tactile[:, : self.tactile_history_length]
+            if history.shape[1] < self.tactile_history_length:
+                history = torch.cat(
+                    (
+                        history[:, :1].expand(
+                            -1, self.tactile_history_length - history.shape[1], -1
+                        ),
+                        history,
+                    ),
+                    dim=1,
+                )
+            if self.use_tactile_temporal:
+                batch, steps, width = history.shape
+                tokens = self.tactile_encoder(history.reshape(batch * steps, width))
+                tactile_features = self.tactile_temporal_encoder(
+                    tokens.reshape(batch, steps, self.tactile_encoder.num_tokens, -1)
+                )
+            else:
+                tactile_features = self.tactile_encoder(history[:, -1])
 
         # Run denoising steps.
         for t in range(num_steps):
