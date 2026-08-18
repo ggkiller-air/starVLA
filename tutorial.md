@@ -75,17 +75,19 @@ Terminal 1, start the starVLA websocket backend (port 8000):
 
 ```bash
 cd /home/wzh/Projects/Uni_VLaT/starVLA
-source .venv/bin/activate
-python -m deployment.model_server.server_sonic_policy \
-  --ckpt-path results/Checkpoints/sonic_jepa/final_model/pytorch_model.pt \
+CUDA_VISIBLE_DEVICES=0 .venv/bin/python deployment/model_server/server_sonic_policy.py \
+  --ckpt-path /home/shared/outputs/starVLA/sonic_htd_compute_matched_20260814_vla_remaining/best_model/pytorch_model.pt \
   --device cuda:0 --use-bf16 --port 8000
 ```
+
+Do not pass the old `desk_sweep` unnormalization key. This checkpoint contains one key,
+`unitree_g1_sonic`, which the server selects automatically when `--unnorm-key` is omitted.
 
 Terminal 2, expose that backend through the Isaac-GR00T ZMQ PolicyServer (port 5550):
 
 ```bash
 cd /home/wzh/Projects/Uni_VLaT/Isaac-GR00T
-uv run --no-sync python gr00t/eval/run_sonic_bridge_server.py \
+.venv/bin/python gr00t/eval/run_sonic_bridge_server.py \
   --backend-host 127.0.0.1 --backend-port 8000 \
   --host 0.0.0.0 --port 5550
 ```
@@ -96,9 +98,11 @@ Terminal 3, launch the shared controller and inference client:
 cd /home/wzh/Projects/Uni_VLaT/GR00T-WholeBodyControl
 python gear_sonic/scripts/launch_inference.py \
   --policy-host 127.0.0.1 --policy-port 5550 \
+  --policy-timeout-ms 60000 \
   --camera-host 192.168.123.164 \
   --tactile-zmq-host 192.168.123.164 \
   --prompt "carry the bucket"
 ```
 
 For a No Tactile checkpoint, omit `--tactile-zmq-host` and add `--no-use-tactile`.
+The verified HTD best checkpoint runs in bf16 on one 24 GB RTX 4090.
