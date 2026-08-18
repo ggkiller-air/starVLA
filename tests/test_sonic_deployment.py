@@ -26,6 +26,11 @@ def test_sonic_observation_contract_accepts_canonical_request():
     assert result["state"].shape == (46,)
     assert result["tactile"].shape == (768,)
 
+    obs = observation()
+    obs["tactile"] = np.zeros((4, 768), dtype=np.uint8)
+    result = validate_observation(obs, requires_tactile=True, tactile_history_length=4)
+    assert result["tactile"].shape == (4, 768)
+
 
 def test_sonic_observation_contract_requires_tactile_for_jepa_checkpoint():
     obs = observation()
@@ -46,7 +51,7 @@ def test_sonic_action_contract_rejects_wrong_shape_and_nonfinite():
 class FakeStarPolicy:
     def __init__(self):
         self._framework = SimpleNamespace(
-            action_model=SimpleNamespace(use_tactile=True)
+            action_model=SimpleNamespace(use_tactile=True, tactile_history_length=4)
         )
         self._model_cfg = {
             "framework": {
@@ -75,12 +80,14 @@ def test_sonic_adapter_forwards_stereo_state_and_tactile_to_starvla():
     policy = FakeStarPolicy()
     adapter = SonicPolicyAdapter(policy, unnorm_key="desk_sweep")
     obs = observation()
+    obs["tactile"] = np.zeros((4, 768), dtype=np.uint8)
     obs["ego_view_left"].fill(1)
     obs["ego_view_right"].fill(2)
 
     result = adapter.infer(obs)
 
     assert result["actions"].shape == (40, 78)
+    assert adapter.metadata["tactile_history_length"] == 4
     assert policy.example is not None
     assert len(policy.example["image"]) == 2
     assert np.all(policy.example["image"][0] == 1)

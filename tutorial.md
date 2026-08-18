@@ -1,8 +1,8 @@
 # starVLA SONIC tactile training
 
 This branch provides the three Table 1 modes from one codebase. Future observations are
-training-only teacher targets; action prediction always conditions on the prompt, current
-46-D state, current stereo pair, and current tactile packet only when tactile is enabled.
+training-only teacher targets; JEPA action prediction conditions on the prompt, current
+46-D state, current stereo pair, and a rolling four-frame tactile history.
 
 | Config | Current tactile | Future tactile | Future state | Future stereo |
 |---|---:|---:|---:|---:|

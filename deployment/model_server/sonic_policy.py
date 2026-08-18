@@ -19,7 +19,9 @@ ACTION_KEYS = (
 )
 
 
-def validate_observation(observation: Mapping[str, Any], *, requires_tactile: bool) -> dict:
+def validate_observation(
+    observation: Mapping[str, Any], *, requires_tactile: bool, tactile_history_length: int = 1
+) -> dict:
     state = np.asarray(observation.get("state"))
     if state.dtype != np.float32 or state.shape != (STATE_DIM,):
         raise ValueError(f"state must be float32[{STATE_DIM}], got {state.dtype} {state.shape}")
@@ -47,9 +49,13 @@ def validate_observation(observation: Mapping[str, Any], *, requires_tactile: bo
         raise ValueError(f"This starVLA checkpoint requires tactile uint8[{TACTILE_DIM}]")
     if tactile_value is not None:
         tactile = np.asarray(tactile_value)
-        if tactile.dtype != np.uint8 or tactile.shape != (TACTILE_DIM,):
+        expected_shape = (
+            (TACTILE_DIM,) if tactile_history_length == 1 else (tactile_history_length, TACTILE_DIM)
+        )
+        if tactile.dtype != np.uint8 or tactile.shape != expected_shape:
             raise ValueError(
-                f"tactile must be uint8[{TACTILE_DIM}], got {tactile.dtype} {tactile.shape}"
+                f"tactile must have shape {expected_shape} and dtype uint8, "
+                f"got {tactile.dtype} {tactile.shape}"
             )
         result["tactile"] = tactile
     return result
@@ -74,6 +80,11 @@ class SonicPolicyAdapter:
         self._unnorm_key = unnorm_key
         action_model = policy._framework.action_model
         self.requires_tactile = bool(getattr(action_model, "use_tactile", False))
+        self.tactile_history_length = (
+            int(getattr(action_model, "tactile_history_length", 1))
+            if self.requires_tactile
+            else 0
+        )
 
         action_cfg = policy._model_cfg["framework"]["action_model"]
         if int(action_cfg["action_dim"]) != ACTION_DIM:
@@ -99,6 +110,7 @@ class SonicPolicyAdapter:
             "action_dim": ACTION_DIM,
             "video_keys": list(VIDEO_KEYS),
             "requires_tactile": self.requires_tactile,
+            "tactile_history_length": self.tactile_history_length,
             "action_layout": {
                 "motion_token": [0, 64],
                 "left_hand_joints": [64, 71],
@@ -107,7 +119,11 @@ class SonicPolicyAdapter:
         }
 
     def infer(self, observation: Mapping[str, Any]) -> dict[str, np.ndarray]:
-        obs = validate_observation(observation, requires_tactile=self.requires_tactile)
+        obs = validate_observation(
+            observation,
+            requires_tactile=self.requires_tactile,
+            tactile_history_length=self.tactile_history_length,
+        )
         example = {
             "image": [obs["ego_view_left"], obs["ego_view_right"]],
             "lang": obs["prompt"],
